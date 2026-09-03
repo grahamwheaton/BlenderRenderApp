@@ -5,12 +5,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace BlenderRenderHeadless;
 
@@ -81,6 +83,28 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) == true) { _blenderExe = dialog.FileName; StatusText.Text = "Blender selected · drop or choose a file"; }
     }
 
+    private void ContactSheetButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_cameras.Count == 0 || _blendFile is null) return;
+        var dialog = new SaveFileDialog
+        {
+            Title = "Save camera contact sheet",
+            Filter = "PDF document (*.pdf)|*.pdf|JPEG image (*.jpg)|*.jpg",
+            DefaultExt = ".pdf",
+            AddExtension = true,
+            FileName = Path.GetFileNameWithoutExtension(_blendFile) + "_contact_sheet.pdf"
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            Mouse.OverrideCursor = Cursors.Wait;
+            var outputs = ContactSheetExporter.Export(_cameras, _blendFile, dialog.FileName, dialog.FilterIndex == 1);
+            StatusText.Text = outputs.Count == 1 ? $"Contact sheet saved · {Path.GetFileName(outputs[0])}" : $"{outputs.Count} contact-sheet pages saved";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Could not create contact sheet", MessageBoxButton.OK, MessageBoxImage.Error); }
+        finally { Mouse.OverrideCursor = null; }
+    }
+
     private async Task LoadBlendAsync(string path)
     {
         if (_queueRunning) return;
@@ -107,7 +131,7 @@ public partial class MainWindow : Window
                     CameraName = name, IsChecked = name == scene.active_camera, IsActive = name == scene.active_camera,
                     ThumbnailPath = scene.thumbnails.GetValueOrDefault(name),
                     UsesPerCameraResolution = cameraResolution.uses_per_camera_resolution,
-                    StartFrame = scene.frame_start.ToString(CultureInfo.InvariantCulture), EndFrame = scene.frame_end.ToString(CultureInfo.InvariantCulture),
+                    StartFrame = scene.frame_start.ToString(CultureInfo.InvariantCulture), EndFrame = scene.frame_end.ToString(CultureInfo.InvariantCulture), FrameStep = scene.frame_step.ToString(CultureInfo.InvariantCulture),
                     DefaultStartFrame = scene.frame_start, DefaultEndFrame = scene.frame_end,
                     KeyframeStart = scene.camera_keyframes.GetValueOrDefault(name)?.start,
                     KeyframeEnd = scene.camera_keyframes.GetValueOrDefault(name)?.end,
@@ -122,7 +146,7 @@ public partial class MainWindow : Window
             }
             ApplyFrameRangeMode();
             CameraCountText.Text = $"{scene.cameras.Count} camera{(scene.cameras.Count == 1 ? "" : "s")} · active camera checked";
-            AddQueueButton.IsEnabled = scene.cameras.Count > 0;
+            AddQueueButton.IsEnabled = ContactSheetButton.IsEnabled = scene.cameras.Count > 0;
             StatusText.Text = scene.cameras.Count > 0 ? "Choose cameras and settings, then add them to the queue" : "No cameras found";
             SetLog(scene.cameras.Count > 0 ? $"Scene ready · {scene.render_engine} · {scene.resolution_x}×{scene.resolution_y} · {scene.file_format}" : "This file has no camera objects.");
         }
@@ -217,6 +241,7 @@ public partial class MainWindow : Window
     private static string? Validate(CameraSetup c)
     {
         if (!int.TryParse(c.StartFrame, out var start) || !int.TryParse(c.EndFrame, out var end) || end < start) return $"{c.CameraName}: invalid frame range.";
+        if (!int.TryParse(c.FrameStep, out var step) || step < 1) return $"{c.CameraName}: frame step must be a positive whole number.";
         if (!int.TryParse(c.Width, out var width) || width < 1 || !int.TryParse(c.Height, out var height) || height < 1) return $"{c.CameraName}: width and height must be positive whole numbers.";
         if (!int.TryParse(c.Scale, out var scale) || scale is < 1 or > 32767) return $"{c.CameraName}: scale must be a positive whole number (maximum 32767).";
         if (!double.TryParse(c.FrameRate, NumberStyles.Float, CultureInfo.InvariantCulture, out var frameRate) || frameRate <= 0 || frameRate > 32767) return $"{c.CameraName}: frame rate must be a positive number (maximum 32767).";
@@ -241,7 +266,7 @@ public partial class MainWindow : Window
             try
             {
                 var script = Path.Combine(AppContext.BaseDirectory, "Scripts", "render_scene.py");
-                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0" };
+                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0" };
                 var code = await RunStreamingAsync(_blenderExe, args, job);
                 job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";
                 if (code == 0 && !_cancelRequested) job.Finish();
@@ -255,7 +280,7 @@ public partial class MainWindow : Window
 
     private void SetUiRunning(bool running)
     {
-        DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = !running;
+        DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = !running;
         foreach (var job in _queue) job.CanRemove = !running;
         RenderQueueButton.Content = running ? "Cancel queue" : "Render queue";
     }
@@ -287,7 +312,7 @@ public partial class MainWindow : Window
     private void SetLog(string text) { LogBox.Text = text; EmptyLogText.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed; LogBox.ScrollToEnd(); }
     private void AppendLog(string text) { EmptyLogText.Visibility = Visibility.Collapsed; LogBox.AppendText(text + Environment.NewLine); LogBox.ScrollToEnd(); }
     private static string Tail(string value, int length) => value.Length <= length ? value : value[^length..];
-    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
+    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
 }
@@ -304,6 +329,7 @@ public class CameraSetup : NotifyBase
     public Visibility ActiveVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
     private string _startFrame = "1"; public string StartFrame { get => _startFrame; set => SetSetting(ref _startFrame, value); }
     private string _endFrame = "250"; public string EndFrame { get => _endFrame; set => SetSetting(ref _endFrame, value); }
+    private string _frameStep = "1"; public string FrameStep { get => _frameStep; set => SetSetting(ref _frameStep, value); }
     public int DefaultStartFrame { get; set; } = 1; public int DefaultEndFrame { get; set; } = 250; public int? KeyframeStart { get; set; } public int? KeyframeEnd { get; set; }
     private string _renderMode = "FINAL"; public string RenderMode { get => _renderMode; set => SetSetting(ref _renderMode, value); }
     private string _engine = "KEEP"; public string Engine { get => _engine; set => SetSetting(ref _engine, value); }
@@ -328,6 +354,7 @@ public class CameraSetup : NotifyBase
         {
             case nameof(StartFrame): StartFrame = source.StartFrame; break;
             case nameof(EndFrame): EndFrame = source.EndFrame; break;
+            case nameof(FrameStep): FrameStep = source.FrameStep; break;
             case nameof(RenderMode): RenderMode = source.RenderMode; break;
             case nameof(Engine): Engine = source.Engine; break;
             case nameof(OutputPath): OutputPath = source.OutputPath; break;
@@ -345,7 +372,7 @@ public class CameraSetup : NotifyBase
 
 public class RenderJob : NotifyBase
 {
-    public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string OutputPath { get; init; } = "";
+    public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string FrameStep { get; init; } = "1"; public string OutputPath { get; init; } = "";
     public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
@@ -353,7 +380,7 @@ public class RenderJob : NotifyBase
     private double _progress; public double Progress { get => _progress; private set => Set(ref _progress, value); }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
     private DateTime _startedAt; private int _lastReportedFrame = int.MinValue;
-    public string FrameSummary => $"Frames {StartFrame}–{EndFrame}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
+    public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
     public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; Progress = 0; Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame)
@@ -371,11 +398,156 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, StartFrame = c.StartFrame, EndFrame = c.EndFrame, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor };
     private static string ResolveTokens(string template, string cameraName, string blendFile) => template
         .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
         .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);
     private static string Sanitize(string value) => string.Concat(value.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+}
+
+public static class ContactSheetExporter
+{
+    private const int PageWidth = 1754;
+    private const int PageHeight = 1240;
+    private const int CamerasPerPage = 8;
+
+    public static IReadOnlyList<string> Export(IEnumerable<CameraSetup> source, string blendFile, string outputPath, bool asPdf)
+    {
+        var cameras = source.ToList();
+        if (cameras.Count == 0) throw new InvalidOperationException("There are no cameras to include.");
+        var pageCount = (int)Math.Ceiling(cameras.Count / (double)CamerasPerPage);
+        var pages = Enumerable.Range(0, pageCount)
+            .Select(page => RenderPage(cameras.Skip(page * CamerasPerPage).Take(CamerasPerPage).ToList(), Path.GetFileName(blendFile), page + 1, pageCount))
+            .ToList();
+
+        var directory = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+        if (asPdf)
+        {
+            WritePdf(outputPath, pages);
+            return [outputPath];
+        }
+
+        var outputs = new List<string>();
+        var basePath = Path.Combine(directory ?? "", Path.GetFileNameWithoutExtension(outputPath));
+        for (var index = 0; index < pages.Count; index++)
+        {
+            var path = pages.Count == 1 ? outputPath : $"{basePath}_{index + 1:00}.jpg";
+            File.WriteAllBytes(path, pages[index]);
+            outputs.Add(path);
+        }
+        return outputs;
+    }
+
+    private static byte[] RenderPage(IReadOnlyList<CameraSetup> cameras, string blendName, int pageNumber, int pageCount)
+    {
+        const double margin = 48;
+        const double headerHeight = 42;
+        const double columnGap = 24;
+        const double rowGap = 28;
+        const double infoHeight = 72;
+        var cellWidth = (PageWidth - margin * 2 - columnGap * 3) / 4;
+        var cellHeight = (PageHeight - margin * 2 - headerHeight - rowGap) / 2;
+        var imageHeight = cellHeight - infoHeight;
+        var visual = new DrawingVisual();
+        using (var drawing = visual.RenderOpen())
+        {
+            drawing.DrawRectangle(Brushes.White, null, new Rect(0, 0, PageWidth, PageHeight));
+            DrawText(drawing, Path.GetFileNameWithoutExtension(blendName), margin, margin + 2, 22, Brushes.Black, FontWeights.SemiBold, PageWidth - margin * 2, 36);
+            DrawText(drawing, $"Camera contact sheet · Page {pageNumber} of {pageCount}", margin, margin + 5, 13, Brushes.DimGray, FontWeights.Normal, PageWidth - margin * 2, 22, TextAlignment.Right);
+
+            for (var index = 0; index < cameras.Count; index++)
+            {
+                var camera = cameras[index];
+                var column = index % 4;
+                var row = index / 4;
+                var x = margin + column * (cellWidth + columnGap);
+                var y = margin + headerHeight + row * (cellHeight + rowGap);
+                var imageRect = new Rect(x, y, cellWidth, imageHeight);
+                drawing.DrawRectangle(new SolidColorBrush(Color.FromRgb(0xF2, 0xF2, 0xF2)), new Pen(Brushes.Black, 1.5), imageRect);
+                var image = LoadImage(camera.ThumbnailPath);
+                if (image is not null)
+                {
+                    var scale = Math.Min(imageRect.Width / image.PixelWidth, imageRect.Height / image.PixelHeight);
+                    var width = image.PixelWidth * scale;
+                    var height = image.PixelHeight * scale;
+                    drawing.DrawImage(image, new Rect(imageRect.X + (imageRect.Width - width) / 2, imageRect.Y + (imageRect.Height - height) / 2, width, height));
+                }
+                else DrawText(drawing, "Preview unavailable", imageRect.X, imageRect.Y + imageRect.Height / 2 - 10, 14, Brushes.Gray, FontWeights.Normal, imageRect.Width, 24, TextAlignment.Center);
+
+                var infoY = y + imageHeight + 8;
+                DrawText(drawing, camera.CameraName, x, infoY, 15, Brushes.Black, FontWeights.SemiBold, cellWidth, 21);
+                DrawText(drawing, $"{camera.Width} × {camera.Height} @ {camera.Scale}%  ·  Frames {camera.StartFrame}-{camera.EndFrame}  ·  Step {camera.FrameStep}", x, infoY + 22, 11, Brushes.DimGray, FontWeights.Normal, cellWidth, 18);
+                DrawText(drawing, $"{camera.RenderMode}  ·  {camera.Engine}  ·  {camera.FrameRate} fps  ·  {camera.Format}", x, infoY + 40, 11, Brushes.DimGray, FontWeights.Normal, cellWidth, 18);
+            }
+        }
+        // DrawingVisual coordinates are device-independent pixels. Rendering at
+        // 96 DPI maps the complete 1754 x 1240 canvas one-to-one without crop.
+        var bitmap = new RenderTargetBitmap(PageWidth, PageHeight, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        var encoder = new JpegBitmapEncoder { QualityLevel = 92 };
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return stream.ToArray();
+    }
+
+    private static BitmapFrame? LoadImage(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+        using var stream = File.OpenRead(path);
+        var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+        var frame = decoder.Frames[0];
+        frame.Freeze();
+        return frame;
+    }
+
+    private static void DrawText(DrawingContext drawing, string text, double x, double y, double size, Brush brush, FontWeight weight, double width, double height, TextAlignment alignment = TextAlignment.Left)
+    {
+        var formatted = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, weight, FontStretches.Normal), size, brush, 1.0)
+        {
+            MaxTextWidth = Math.Max(1, width),
+            MaxTextHeight = Math.Max(1, height),
+            Trimming = TextTrimming.CharacterEllipsis,
+            TextAlignment = alignment
+        };
+        drawing.DrawText(formatted, new Point(x, y));
+    }
+
+    private static void WritePdf(string path, IReadOnlyList<byte[]> pages)
+    {
+        var objectCount = 2 + pages.Count * 3;
+        var offsets = new long[objectCount + 1];
+        using var stream = File.Create(path);
+        void WriteAscii(string value) { var bytes = Encoding.ASCII.GetBytes(value); stream.Write(bytes); }
+        void BeginObject(int id) { offsets[id] = stream.Position; WriteAscii($"{id} 0 obj\n"); }
+
+        WriteAscii("%PDF-1.4\n%BRH\n");
+        BeginObject(1); WriteAscii("<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        BeginObject(2);
+        WriteAscii($"<< /Type /Pages /Count {pages.Count} /Kids [{string.Join(" ", Enumerable.Range(0, pages.Count).Select(index => $"{3 + index * 3} 0 R"))}] >>\nendobj\n");
+        for (var index = 0; index < pages.Count; index++)
+        {
+            var pageId = 3 + index * 3;
+            var imageId = pageId + 1;
+            var contentId = pageId + 2;
+            BeginObject(pageId);
+            WriteAscii($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 841.89 595.28] /Resources << /XObject << /Im0 {imageId} 0 R >> >> /Contents {contentId} 0 R >>\nendobj\n");
+            BeginObject(imageId);
+            WriteAscii($"<< /Type /XObject /Subtype /Image /Width {PageWidth} /Height {PageHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {pages[index].Length} >>\nstream\n");
+            stream.Write(pages[index]);
+            WriteAscii("\nendstream\nendobj\n");
+            var content = Encoding.ASCII.GetBytes("q 841.89 0 0 595.28 0 0 cm /Im0 Do Q\n");
+            BeginObject(contentId);
+            WriteAscii($"<< /Length {content.Length} >>\nstream\n");
+            stream.Write(content);
+            WriteAscii("endstream\nendobj\n");
+        }
+        var xref = stream.Position;
+        WriteAscii($"xref\n0 {objectCount + 1}\n0000000000 65535 f \n");
+        for (var id = 1; id <= objectCount; id++) WriteAscii($"{offsets[id]:0000000000} 00000 n \n");
+        WriteAscii($"trailer\n<< /Size {objectCount + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+    }
 }
 
 public abstract class NotifyBase : INotifyPropertyChanged

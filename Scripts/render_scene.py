@@ -4,7 +4,7 @@ import os
 import sys
 
 args = sys.argv[sys.argv.index("--") + 1:]
-camera_name, start_text, end_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor = args
+camera_name, start_text, end_text, step_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor = args
 camera = bpy.data.objects.get(camera_name)
 if camera is None or camera.type != 'CAMERA':
     raise RuntimeError(f"Camera not found: {camera_name}")
@@ -13,6 +13,7 @@ scene = bpy.context.scene
 scene.camera = camera
 scene.frame_start = int(start_text)
 scene.frame_end = int(end_text)
+scene.frame_step = int(step_text)
 scene.render.filepath = output_path
 if render_mode == 'PLAYBLAST':
     scene.render.engine = 'BLENDER_WORKBENCH'
@@ -38,7 +39,7 @@ if hasattr(camera.data, 'per_camera_resolution'):
         camera_resolution.resolution_y = int(height)
         camera_resolution.resolution_percentage = int(scale)
 scene.render.image_settings.file_format = file_format
-print(f"BRH: Mode {render_mode} | camera {camera_name} | frames {scene.frame_start}-{scene.frame_end} | {scene.render.resolution_x}x{scene.render.resolution_y} at {scene.render.resolution_percentage}% | {scene.render.fps / scene.render.fps_base:g} fps | {scene.render.engine} | {scene.render.image_settings.file_format} | overwrite={scene.render.use_overwrite} | placeholders={scene.render.use_placeholder} | compositor={scene.render.use_compositing} | output {scene.render.filepath}")
+print(f"BRH: Mode {render_mode} | camera {camera_name} | frames {scene.frame_start}-{scene.frame_end} step {scene.frame_step} | {scene.render.resolution_x}x{scene.render.resolution_y} at {scene.render.resolution_percentage}% | {scene.render.fps / scene.render.fps_base:g} fps | {scene.render.engine} | {scene.render.image_settings.file_format} | overwrite={scene.render.use_overwrite} | placeholders={scene.render.use_placeholder} | compositor={scene.render.use_compositing} | output {scene.render.filepath}")
 def report_completed_frame(render_scene):
     print(f"BRH_FRAME_DONE:{render_scene.frame_current}", flush=True)
 

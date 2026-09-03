@@ -148,6 +148,7 @@ data = {
     "active_camera": saved_active_camera,
     "frame_start": scene.frame_start,
     "frame_end": scene.frame_end,
+    "frame_step": scene.frame_step,
     "output_path": saved_filepath,
     "render_engine": saved_engine,
     "resolution_x": saved_x,

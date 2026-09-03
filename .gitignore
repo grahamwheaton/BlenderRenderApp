@@ -7,3 +7,4 @@ Render/
 TESTRENDER/
 *.blend
 *.blend[0-9]
+tmp/

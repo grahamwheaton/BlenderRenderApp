@@ -17,6 +17,8 @@ Output paths support `{camera_name}` and `{blend_name}` tokens. Global frame opt
 
 Hold Alt while changing any per-camera setting to copy that value to the other selected cameras.
 
+The Contact sheet button exports all camera previews and compact render details as A4-landscape PDF pages or JPEG images, arranged four columns by two rows.
+
 The app starts with the settings saved in the `.blend` file. All overrides are applied only to the background render process; the original file is not saved or changed.
 
 Playblast mode forces Blender's fast Workbench renderer, producing a camera-view preview that works reliably without opening Blender's viewport.
