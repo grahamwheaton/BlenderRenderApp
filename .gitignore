@@ -1,0 +1,9 @@
+bin/
+obj/
+.vs/
+*.user
+App/
+Render/
+TESTRENDER/
+*.blend
+*.blend[0-9]
