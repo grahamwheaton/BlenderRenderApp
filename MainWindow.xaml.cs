@@ -107,6 +107,9 @@ public partial class MainWindow : Window
                     ThumbnailPath = scene.thumbnails.GetValueOrDefault(name),
                     UsesPerCameraResolution = cameraResolution.uses_per_camera_resolution,
                     StartFrame = scene.frame_start.ToString(CultureInfo.InvariantCulture), EndFrame = scene.frame_end.ToString(CultureInfo.InvariantCulture),
+                    DefaultStartFrame = scene.frame_start, DefaultEndFrame = scene.frame_end,
+                    KeyframeStart = scene.camera_keyframes.GetValueOrDefault(name)?.start,
+                    KeyframeEnd = scene.camera_keyframes.GetValueOrDefault(name)?.end,
                     OutputPath = CameraOutputPath(scene.output_path, name), Engine = "KEEP", RenderMode = "FINAL",
                     Width = cameraResolution.resolution_x.ToString(CultureInfo.InvariantCulture), Height = cameraResolution.resolution_y.ToString(CultureInfo.InvariantCulture),
                     Scale = cameraResolution.resolution_percentage.ToString(CultureInfo.InvariantCulture),
@@ -114,6 +117,7 @@ public partial class MainWindow : Window
                     Overwrite = scene.use_overwrite, Placeholders = scene.use_placeholder, IgnoreCompositor = !scene.use_compositing
                 });
             }
+            ApplyFrameRangeMode();
             CameraCountText.Text = $"{scene.cameras.Count} camera{(scene.cameras.Count == 1 ? "" : "s")} · active camera checked";
             AddQueueButton.IsEnabled = scene.cameras.Count > 0;
             StatusText.Text = scene.cameras.Count > 0 ? "Choose cameras and settings, then add them to the queue" : "No cameras found";
@@ -135,6 +139,47 @@ public partial class MainWindow : Window
         if ((sender as Button)?.Tag is not CameraSetup camera) return;
         var dialog = new OpenFolderDialog { Title = $"Choose output folder for {camera.CameraName}", Multiselect = false };
         if (dialog.ShowDialog(this) == true) camera.OutputPath = dialog.FolderName + Path.DirectorySeparatorChar;
+    }
+
+    private void OutputToken_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox combo || combo.Tag is not CameraSetup camera || combo.SelectedItem is not ComboBoxItem item || item.Tag is not string token) return;
+        camera.OutputPath += token;
+        combo.SelectedIndex = 0;
+    }
+
+    private void FrameRangeMode_Changed(object sender, RoutedEventArgs e)
+    {
+        if (sender == StillsOnlyCheckBox && StillsOnlyCheckBox.IsChecked == true) KeyframeRangeCheckBox.IsChecked = false;
+        if (sender == KeyframeRangeCheckBox && KeyframeRangeCheckBox.IsChecked == true) StillsOnlyCheckBox.IsChecked = false;
+        ApplyFrameRangeMode();
+    }
+
+    private void StillFrameText_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (StillsOnlyCheckBox?.IsChecked == true) ApplyFrameRangeMode();
+    }
+
+    private void ApplyFrameRangeMode()
+    {
+        if (StillsOnlyCheckBox?.IsChecked == true && int.TryParse(StillFrameText?.Text, out var stillFrame))
+        {
+            foreach (var camera in _cameras) { camera.StartFrame = stillFrame.ToString(CultureInfo.InvariantCulture); camera.EndFrame = camera.StartFrame; }
+            return;
+        }
+        foreach (var camera in _cameras)
+        {
+            if (KeyframeRangeCheckBox?.IsChecked == true && camera.KeyframeStart.HasValue && camera.KeyframeEnd.HasValue)
+            {
+                camera.StartFrame = camera.KeyframeStart.Value.ToString(CultureInfo.InvariantCulture);
+                camera.EndFrame = camera.KeyframeEnd.Value.ToString(CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                camera.StartFrame = camera.DefaultStartFrame.ToString(CultureInfo.InvariantCulture);
+                camera.EndFrame = camera.DefaultEndFrame.ToString(CultureInfo.InvariantCulture);
+            }
+        }
     }
 
     private void AddQueueButton_Click(object sender, RoutedEventArgs e)
@@ -221,8 +266,9 @@ public partial class MainWindow : Window
     private void SetLog(string text) { LogBox.Text = text; EmptyLogText.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed; LogBox.ScrollToEnd(); }
     private void AppendLog(string text) { EmptyLogText.Visibility = Visibility.Collapsed; LogBox.AppendText(text + Environment.NewLine); LogBox.ScrollToEnd(); }
     private static string Tail(string value, int length) => value.Length <= length ? value : value[^length..];
-    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings);
+    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
+    private sealed record CameraKeyframeInfo(int start, int end);
 }
 
 public class CameraSetup : NotifyBase
@@ -232,7 +278,10 @@ public class CameraSetup : NotifyBase
     public bool UsesPerCameraResolution { get; set; }
     public Visibility PerCameraResolutionVisibility => UsesPerCameraResolution ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ActiveVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
-    public string StartFrame { get; set; } = "1"; public string EndFrame { get; set; } = "250"; public string RenderMode { get; set; } = "FINAL"; public string Engine { get; set; } = "KEEP";
+    private string _startFrame = "1"; public string StartFrame { get => _startFrame; set => Set(ref _startFrame, value); }
+    private string _endFrame = "250"; public string EndFrame { get => _endFrame; set => Set(ref _endFrame, value); }
+    public int DefaultStartFrame { get; set; } = 1; public int DefaultEndFrame { get; set; } = 250; public int? KeyframeStart { get; set; } public int? KeyframeEnd { get; set; }
+    public string RenderMode { get; set; } = "FINAL"; public string Engine { get; set; } = "KEEP";
     private string _outputPath = ""; public string OutputPath { get => _outputPath; set => Set(ref _outputPath, value); }
     public string Width { get; set; } = "1920"; public string Height { get; set; } = "1080"; public string Scale { get; set; } = "100"; public string FrameRate { get; set; } = "24"; public string Format { get; set; } = "PNG";
     public bool Overwrite { get; set; } = true; public bool Placeholders { get; set; } public bool IgnoreCompositor { get; set; }
@@ -266,7 +315,11 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, StartFrame = c.StartFrame, EndFrame = c.EndFrame, OutputPath = c.OutputPath, RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, StartFrame = c.StartFrame, EndFrame = c.EndFrame, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor };
+    private static string ResolveTokens(string template, string cameraName, string blendFile) => template
+        .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
+        .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);
+    private static string Sanitize(string value) => string.Concat(value.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
 }
 
 public abstract class NotifyBase : INotifyPropertyChanged

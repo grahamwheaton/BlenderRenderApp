@@ -1,5 +1,6 @@
 import bpy
 import json
+import math
 import os
 import re
 import sys
@@ -59,6 +60,30 @@ def get_camera_resolution(camera):
 
 camera_settings = {
     camera.name: get_camera_resolution(camera)
+    for camera in bpy.data.objects if camera.type == 'CAMERA'
+}
+
+def get_camera_keyframe_range(camera):
+    """Return the full frame range of animation attached to the camera object."""
+    animation = camera.animation_data
+    if animation is None:
+        return None
+    ranges = []
+    if animation.action is not None:
+        start, end = animation.action.frame_range
+        ranges.append((start, end))
+    for track in animation.nla_tracks:
+        for strip in track.strips:
+            ranges.append((strip.frame_start, strip.frame_end))
+    if not ranges:
+        return None
+    return {
+        "start": math.floor(min(item[0] for item in ranges)),
+        "end": math.ceil(max(item[1] for item in ranges)),
+    }
+
+camera_keyframes = {
+    camera.name: get_camera_keyframe_range(camera)
     for camera in bpy.data.objects if camera.type == 'CAMERA'
 }
 thumbnail_dir = None
@@ -135,5 +160,6 @@ data = {
     "use_compositing": saved_use_compositing,
     "thumbnails": thumbnails,
     "camera_settings": camera_settings,
+    "camera_keyframes": camera_keyframes,
 }
 print("BRH_JSON:" + json.dumps(data, ensure_ascii=False))

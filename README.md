@@ -13,6 +13,8 @@ A small Windows desktop app for launching Blender animation renders without open
 
 Each queued job shows its completed-frame progress and an estimated finish time based on the average duration of the frames rendered so far.
 
+Output paths support `{camera_name}` and `{blend_name}` tokens. Global frame options can render one still frame or use the first and last animation frames attached to each camera object.
+
 The app starts with the settings saved in the `.blend` file. All overrides are applied only to the background render process; the original file is not saved or changed.
 
 Playblast mode forces Blender's fast Workbench renderer, producing a camera-view preview that works reliably without opening Blender's viewport.
