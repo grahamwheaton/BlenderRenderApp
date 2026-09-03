@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private Process? _renderProcess;
     private bool _queueRunning;
     private bool _cancelRequested;
+    private bool _syncingCameraSettings;
     private const string Marker = "BRH_JSON:";
     private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)", RegexOptions.Compiled);
 
@@ -101,7 +102,7 @@ public partial class MainWindow : Window
             {
                 var cameraResolution = scene.camera_settings.GetValueOrDefault(name) ??
                     new CameraResolutionInfo(false, scene.resolution_x, scene.resolution_y, scene.resolution_percentage);
-                _cameras.Add(new CameraSetup
+                var cameraSetup = new CameraSetup
                 {
                     CameraName = name, IsChecked = name == scene.active_camera, IsActive = name == scene.active_camera,
                     ThumbnailPath = scene.thumbnails.GetValueOrDefault(name),
@@ -115,7 +116,9 @@ public partial class MainWindow : Window
                     Scale = cameraResolution.resolution_percentage.ToString(CultureInfo.InvariantCulture),
                     FrameRate = scene.frame_rate.ToString("0.###", CultureInfo.InvariantCulture), Format = scene.file_format,
                     Overwrite = scene.use_overwrite, Placeholders = scene.use_placeholder, IgnoreCompositor = !scene.use_compositing
-                });
+                };
+                cameraSetup.SettingChanged = CameraSettingChanged;
+                _cameras.Add(cameraSetup);
             }
             ApplyFrameRangeMode();
             CameraCountText.Text = $"{scene.cameras.Count} camera{(scene.cameras.Count == 1 ? "" : "s")} · active camera checked";
@@ -164,6 +167,18 @@ public partial class MainWindow : Window
     {
         var isChecked = SelectAllCheckBox?.IsChecked == true;
         foreach (var camera in _cameras) camera.IsChecked = isChecked;
+    }
+
+    private void CameraSettingChanged(CameraSetup source, string propertyName)
+    {
+        if (_syncingCameraSettings || (Keyboard.Modifiers & ModifierKeys.Alt) == 0) return;
+        _syncingCameraSettings = true;
+        try
+        {
+            foreach (var camera in _cameras.Where(camera => camera != source && camera.IsChecked))
+                camera.CopySettingFrom(source, propertyName);
+        }
+        finally { _syncingCameraSettings = false; }
     }
 
     private void ApplyFrameRangeMode()
@@ -279,6 +294,7 @@ public partial class MainWindow : Window
 
 public class CameraSetup : NotifyBase
 {
+    public Action<CameraSetup, string>? SettingChanged { get; set; }
     public string CameraName { get; set; } = "";
     private bool _isChecked; public bool IsChecked { get => _isChecked; set => Set(ref _isChecked, value); }
     public bool IsActive { get; set; }
@@ -286,13 +302,45 @@ public class CameraSetup : NotifyBase
     public bool UsesPerCameraResolution { get; set; }
     public Visibility PerCameraResolutionVisibility => UsesPerCameraResolution ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ActiveVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
-    private string _startFrame = "1"; public string StartFrame { get => _startFrame; set => Set(ref _startFrame, value); }
-    private string _endFrame = "250"; public string EndFrame { get => _endFrame; set => Set(ref _endFrame, value); }
+    private string _startFrame = "1"; public string StartFrame { get => _startFrame; set => SetSetting(ref _startFrame, value); }
+    private string _endFrame = "250"; public string EndFrame { get => _endFrame; set => SetSetting(ref _endFrame, value); }
     public int DefaultStartFrame { get; set; } = 1; public int DefaultEndFrame { get; set; } = 250; public int? KeyframeStart { get; set; } public int? KeyframeEnd { get; set; }
-    public string RenderMode { get; set; } = "FINAL"; public string Engine { get; set; } = "KEEP";
-    private string _outputPath = ""; public string OutputPath { get => _outputPath; set => Set(ref _outputPath, value); }
-    public string Width { get; set; } = "1920"; public string Height { get; set; } = "1080"; public string Scale { get; set; } = "100"; public string FrameRate { get; set; } = "24"; public string Format { get; set; } = "PNG";
-    public bool Overwrite { get; set; } = true; public bool Placeholders { get; set; } public bool IgnoreCompositor { get; set; }
+    private string _renderMode = "FINAL"; public string RenderMode { get => _renderMode; set => SetSetting(ref _renderMode, value); }
+    private string _engine = "KEEP"; public string Engine { get => _engine; set => SetSetting(ref _engine, value); }
+    private string _outputPath = ""; public string OutputPath { get => _outputPath; set => SetSetting(ref _outputPath, value); }
+    private string _width = "1920"; public string Width { get => _width; set => SetSetting(ref _width, value); }
+    private string _height = "1080"; public string Height { get => _height; set => SetSetting(ref _height, value); }
+    private string _scale = "100"; public string Scale { get => _scale; set => SetSetting(ref _scale, value); }
+    private string _frameRate = "24"; public string FrameRate { get => _frameRate; set => SetSetting(ref _frameRate, value); }
+    private string _format = "PNG"; public string Format { get => _format; set => SetSetting(ref _format, value); }
+    private bool _overwrite = true; public bool Overwrite { get => _overwrite; set => SetSetting(ref _overwrite, value); }
+    private bool _placeholders; public bool Placeholders { get => _placeholders; set => SetSetting(ref _placeholders, value); }
+    private bool _ignoreCompositor; public bool IgnoreCompositor { get => _ignoreCompositor; set => SetSetting(ref _ignoreCompositor, value); }
+
+    private void SetSetting<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
+    {
+        if (Set(ref field, value, propertyName)) SettingChanged?.Invoke(this, propertyName);
+    }
+
+    public void CopySettingFrom(CameraSetup source, string propertyName)
+    {
+        switch (propertyName)
+        {
+            case nameof(StartFrame): StartFrame = source.StartFrame; break;
+            case nameof(EndFrame): EndFrame = source.EndFrame; break;
+            case nameof(RenderMode): RenderMode = source.RenderMode; break;
+            case nameof(Engine): Engine = source.Engine; break;
+            case nameof(OutputPath): OutputPath = source.OutputPath; break;
+            case nameof(Width): Width = source.Width; break;
+            case nameof(Height): Height = source.Height; break;
+            case nameof(Scale): Scale = source.Scale; break;
+            case nameof(FrameRate): FrameRate = source.FrameRate; break;
+            case nameof(Format): Format = source.Format; break;
+            case nameof(Overwrite): Overwrite = source.Overwrite; break;
+            case nameof(Placeholders): Placeholders = source.Placeholders; break;
+            case nameof(IgnoreCompositor): IgnoreCompositor = source.IgnoreCompositor; break;
+        }
+    }
 }
 
 public class RenderJob : NotifyBase
