@@ -85,7 +85,7 @@ public partial class MainWindow : Window
         if (_queueRunning) return;
         _blendFile = path;
         DropTitleText.Text = Path.GetFileName(path); DropSubtitleText.Text = path; DropSubtitleText.ToolTip = path;
-        _cameras.Clear(); AddQueueButton.IsEnabled = false; CameraCountText.Text = "Inspecting…";
+        _cameras.Clear(); SelectAllCheckBox.IsChecked = false; AddQueueButton.IsEnabled = false; CameraCountText.Text = "Inspecting…";
         if (_blenderExe is null) { StatusText.Text = "Choose blender.exe to inspect this file"; return; }
         StatusText.Text = "Reading cameras and generating previews…"; SetLog("Inspecting the Blender file and rendering camera thumbnails…");
         try
@@ -158,6 +158,12 @@ public partial class MainWindow : Window
     private void StillFrameText_Changed(object sender, TextChangedEventArgs e)
     {
         if (StillsOnlyCheckBox?.IsChecked == true) ApplyFrameRangeMode();
+    }
+
+    private void SelectAll_Changed(object sender, RoutedEventArgs e)
+    {
+        var isChecked = SelectAllCheckBox?.IsChecked == true;
+        foreach (var camera in _cameras) camera.IsChecked = isChecked;
     }
 
     private void ApplyFrameRangeMode()
@@ -273,7 +279,9 @@ public partial class MainWindow : Window
 
 public class CameraSetup : NotifyBase
 {
-    public string CameraName { get; set; } = ""; public bool IsChecked { get; set; } public bool IsActive { get; set; }
+    public string CameraName { get; set; } = "";
+    private bool _isChecked; public bool IsChecked { get => _isChecked; set => Set(ref _isChecked, value); }
+    public bool IsActive { get; set; }
     public string? ThumbnailPath { get; set; }
     public bool UsesPerCameraResolution { get; set; }
     public Visibility PerCameraResolutionVisibility => UsesPerCameraResolution ? Visibility.Visible : Visibility.Collapsed;
