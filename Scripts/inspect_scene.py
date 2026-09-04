@@ -17,6 +17,30 @@ saved_use_overwrite = scene.render.use_overwrite
 saved_use_placeholder = scene.render.use_placeholder
 saved_use_compositing = scene.render.use_compositing
 saved_film_transparent = scene.render.film_transparent
+saved_save_output = getattr(scene.render, "save_output", True)
+
+def compositor_file_output():
+    tree = getattr(scene, "compositing_node_group", None) or getattr(scene, "node_tree", None)
+    if tree is None:
+        return None
+    nodes = [node for node in tree.nodes if node.bl_idname == "CompositorNodeOutputFile" and not node.mute]
+    linked = [node for node in nodes if any(socket.is_linked for socket in node.inputs)]
+    node = (linked or nodes or [None])[0]
+    if node is None:
+        return None
+    directory = getattr(node, "directory", None)
+    filename = getattr(node, "file_name", None)
+    if directory is None:
+        directory = getattr(node, "base_path", "")
+        slots = getattr(node, "file_slots", None)
+        filename = slots[0].path if slots and len(slots) else ""
+    combined = os.path.join(directory or "", filename or "")
+    node_format = getattr(getattr(node, "format", None), "file_format", saved_format)
+    return {"path": bpy.path.abspath(combined), "node": node.name, "format": node_format} if combined else None
+
+compositor_output = compositor_file_output() if not saved_save_output else None
+effective_output_path = compositor_output["path"] if compositor_output else saved_filepath
+effective_format = compositor_output["format"] if compositor_output else saved_format
 
 # Register only Per-Camera Resolution inside the otherwise isolated Blender
 # session. Its saved PropertyGroup values are exposed through RNA only after
@@ -150,12 +174,15 @@ data = {
     "frame_start": scene.frame_start,
     "frame_end": scene.frame_end,
     "frame_step": scene.frame_step,
-    "output_path": saved_filepath,
+    "output_path": effective_output_path,
+    "save_output": saved_save_output,
+    "uses_compositor_output": compositor_output is not None,
+    "compositor_output_node": compositor_output["node"] if compositor_output else None,
     "render_engine": saved_engine,
     "resolution_x": saved_x,
     "resolution_y": saved_y,
     "resolution_percentage": saved_percentage,
-    "file_format": saved_format,
+    "file_format": effective_format,
     "frame_rate": saved_frame_rate,
     "use_overwrite": saved_use_overwrite,
     "use_placeholder": saved_use_placeholder,

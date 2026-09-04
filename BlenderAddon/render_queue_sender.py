@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 2, 1),
+    "version": (5, 3, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -52,6 +52,30 @@ def camera_resolution(scene, camera):
     return int(width), int(height), int(scale)
 
 
+def render_output(scene):
+    if getattr(scene.render, "save_output", True):
+        return bpy.path.abspath(scene.render.filepath), False, "", scene.render.image_settings.file_format
+    tree = getattr(scene, "compositing_node_group", None) or getattr(scene, "node_tree", None)
+    if tree is None:
+        raise RuntimeError("Output is disabled and the compositor has no File Output node tree.")
+    nodes = [node for node in tree.nodes if node.bl_idname == "CompositorNodeOutputFile" and not node.mute]
+    linked = [node for node in nodes if any(socket.is_linked for socket in node.inputs)]
+    node = (linked or nodes or [None])[0]
+    if node is None:
+        raise RuntimeError("Output is disabled and no enabled compositor File Output node was found.")
+    directory = getattr(node, "directory", None)
+    filename = getattr(node, "file_name", None)
+    if directory is None:
+        directory = getattr(node, "base_path", "")
+        slots = getattr(node, "file_slots", None)
+        filename = slots[0].path if slots and len(slots) else ""
+    combined = os.path.join(directory or "", filename or "")
+    if not combined:
+        raise RuntimeError(f"Compositor File Output node '{node.name}' has no output path.")
+    node_format = getattr(getattr(node, "format", None), "file_format", scene.render.image_settings.file_format)
+    return bpy.path.abspath(combined), True, node.name, node_format
+
+
 def build_job(context, render_mode, viewport_shading="SOLID"):
     scene = context.scene
     camera = scene.camera
@@ -68,6 +92,7 @@ def build_job(context, render_mode, viewport_shading="SOLID"):
     if not Path(blend_file).is_file():
         raise RuntimeError(f"The Blender file is not accessible: {blend_file}")
     width, height, scale = camera_resolution(scene, camera)
+    output_path, uses_compositor_output, compositor_output_node, output_format = render_output(scene)
     user, machine = sender_stamp()
     return {
         "version": 1,
@@ -77,13 +102,15 @@ def build_job(context, render_mode, viewport_shading="SOLID"):
         "startFrame": int(scene.frame_start),
         "endFrame": int(scene.frame_end),
         "frameStep": int(scene.frame_step),
-        "outputPath": bpy.path.abspath(scene.render.filepath),
+        "outputPath": output_path,
+        "usesCompositorOutput": uses_compositor_output,
+        "compositorOutputNode": compositor_output_node,
         "engine": scene.render.engine,
         "width": width,
         "height": height,
         "scale": scale,
         "frameRate": scene.render.fps / scene.render.fps_base,
-        "format": scene.render.image_settings.file_format,
+        "format": output_format,
         "renderMode": render_mode,
         "viewportShading": viewport_shading,
         "distributed": True,
@@ -114,7 +141,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.2.1", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.3.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
@@ -138,7 +165,7 @@ def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None):
 
 class RENDERQUEUE_OT_cloud_render(Operator):
     bl_idname = "render.cloud_render"
-    bl_label = "Cloud Render (V5.2.1)"
+    bl_label = "Cloud Render (V5.3)"
     bl_description = "Send the active camera to every renderer watching the shared NAS queue"
 
     def execute(self, context):
@@ -153,7 +180,7 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
-    bl_label = "Cloud Playblast (V5.2.1)"
+    bl_label = "Cloud Playblast (V5.3)"
     bl_description = "Send a true viewport playblast job to a listening Blender Render app"
 
     def execute(self, context):

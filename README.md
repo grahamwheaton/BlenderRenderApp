@@ -67,3 +67,7 @@ Run it from **3D View > View > Cloud Playblast**. V5 currently requires an image
 Enable **ONLY MY PC** beside Watch to ignore jobs sent from other computers. The app and Blender menu/preferences display their V5 version so installations can be checked at a glance.
 
 Queue thumbnails are refreshed from the latest completed frame at most once every 10 seconds, with a final refresh when the job completes. This keeps previews current without repeatedly decoding images during rendering.
+
+## V5.3 output detection and frame-range controls
+
+When **Output** is disabled in Blender's Output Properties, the launcher detects the first enabled, connected compositor **File Output** node and uses its directory, filename template, and file format. The focused camera shows a **COMPOSITOR FILE OUTPUT** badge when this fallback is active. Stills-only controls have been removed, and **Range from camera keyframes** now sits directly beneath the focused camera's Frame Range fields.

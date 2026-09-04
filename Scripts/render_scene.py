@@ -11,7 +11,7 @@ import traceback
 import uuid
 
 args = sys.argv[sys.argv.index("--") + 1:]
-camera_name, start_text, end_text, step_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor, transparent_background, viewport_shading, distributed_text, job_id, coordination_folder = args
+camera_name, start_text, end_text, step_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor, transparent_background, viewport_shading, distributed_text, job_id, coordination_folder, compositor_output_text, compositor_output_node = args
 camera = bpy.data.objects.get(camera_name)
 if camera is None or camera.type != 'CAMERA':
     raise RuntimeError(f"Camera not found: {camera_name}")
@@ -22,6 +22,24 @@ scene.frame_start = int(start_text)
 scene.frame_end = int(end_text)
 scene.frame_step = int(step_text)
 scene.render.filepath = output_path
+uses_compositor_output = compositor_output_text == '1'
+compositor_node = None
+if uses_compositor_output:
+    tree = getattr(scene, 'compositing_node_group', None) or getattr(scene, 'node_tree', None)
+    compositor_node = tree.nodes.get(compositor_output_node) if tree else None
+    if compositor_node is None or compositor_node.bl_idname != 'CompositorNodeOutputFile' or compositor_node.mute:
+        raise RuntimeError(f"Compositor File Output node is unavailable: {compositor_output_node}")
+    directory, filename = os.path.split(output_path)
+    if hasattr(compositor_node, 'directory'):
+        compositor_node.directory = directory
+        compositor_node.file_name = filename
+    else:
+        compositor_node.base_path = directory
+        if compositor_node.file_slots:
+            compositor_node.file_slots[0].path = filename
+    compositor_node.format.file_format = file_format
+    if hasattr(scene.render, 'save_output'):
+        scene.render.save_output = False
 if render_mode == 'PLAYBLAST' and viewport_shading == 'RENDERED':
     if engine != 'KEEP':
         scene.render.engine = engine
@@ -60,13 +78,41 @@ if hasattr(camera.data, 'per_camera_resolution'):
         camera_resolution.resolution_y = int(height)
         camera_resolution.resolution_percentage = int(scale)
 scene.render.image_settings.file_format = file_format
-print(f"BRH: Mode {render_mode} | camera {camera_name} | frames {scene.frame_start}-{scene.frame_end} step {scene.frame_step} | {scene.render.resolution_x}x{scene.render.resolution_y} at {scene.render.resolution_percentage}% | {scene.render.fps / scene.render.fps_base:g} fps | {scene.render.engine} | {scene.render.image_settings.file_format} | overwrite={scene.render.use_overwrite} | placeholders={scene.render.use_placeholder} | compositor={scene.render.use_compositing} | transparent={scene.render.film_transparent} | output {scene.render.filepath}")
+print(f"BRH: Mode {render_mode} | camera {camera_name} | frames {scene.frame_start}-{scene.frame_end} step {scene.frame_step} | {scene.render.resolution_x}x{scene.render.resolution_y} at {scene.render.resolution_percentage}% | {scene.render.fps / scene.render.fps_base:g} fps | {scene.render.engine} | {scene.render.image_settings.file_format} | overwrite={scene.render.use_overwrite} | placeholders={scene.render.use_placeholder} | compositor={scene.render.use_compositing} | compositor_output={uses_compositor_output} | transparent={scene.render.film_transparent} | output {scene.render.filepath}")
+
+def compositor_frame_path(frame):
+    if compositor_node is None:
+        return None
+    if hasattr(compositor_node, 'directory'):
+        directory = bpy.path.abspath(compositor_node.directory)
+        filename = compositor_node.file_name
+        items = compositor_node.file_output_items
+        item_name = items[0].name if len(items) else ''
+    else:
+        directory = bpy.path.abspath(compositor_node.base_path)
+        slots = compositor_node.file_slots
+        filename = slots[0].path if len(slots) else ''
+        item_name = ''
+    def replace_hashes(match):
+        return str(frame).zfill(len(match.group(0)))
+    if '#' in filename:
+        filename = re.sub(r'#+', replace_hashes, filename)
+    else:
+        filename += str(frame).zfill(4)
+    extension = {
+        'BMP': '.bmp', 'IRIS': '.rgb', 'PNG': '.png', 'JPEG': '.jpg',
+        'JPEG2000': '.jp2', 'TARGA': '.tga', 'TARGA_RAW': '.tga',
+        'CINEON': '.cin', 'DPX': '.dpx', 'OPEN_EXR_MULTILAYER': '.exr',
+        'OPEN_EXR': '.exr', 'HDR': '.hdr', 'TIFF': '.tif', 'WEBP': '.webp'
+    }.get(compositor_node.format.file_format, scene.render.file_extension)
+    return os.path.join(directory, filename + item_name + extension)
+
 def report_completed_frame(render_scene):
-    rendered_path = bpy.path.abspath(render_scene.render.frame_path(frame=render_scene.frame_current))
+    rendered_path = compositor_frame_path(render_scene.frame_current) if uses_compositor_output else bpy.path.abspath(render_scene.render.frame_path(frame=render_scene.frame_current))
     print(f"BRH_FRAME_DONE:{render_scene.frame_current}|{rendered_path}", flush=True)
 
 def valid_output(frame):
-    path = bpy.path.abspath(scene.render.frame_path(frame=frame))
+    path = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
     try:
         return os.path.isfile(path) and os.path.getsize(path) > 0
     except OSError:
@@ -120,7 +166,7 @@ def render_distributed():
         for frame in frames:
             if frame not in reported and frame_complete(frame):
                 reported.add(frame)
-                path = bpy.path.abspath(scene.render.frame_path(frame=frame))
+                path = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
                 print(f"BRH_FRAME_DONE:{frame}|{path}|{len(reported)}|{len(frames)}", flush=True)
         active_claims = [name for name in os.listdir(claim_dir) if name.endswith('.claim')]
         if len(reported) == len(frames) and not active_claims:
@@ -153,12 +199,15 @@ def render_distributed():
             try:
                 if replace_existing or not valid_output(frame):
                     scene.frame_set(frame)
-                    frame_output = bpy.path.abspath(scene.render.frame_path(frame=frame))
-                    scene.render.filepath = frame_output
-                    try:
-                        bpy.ops.render.render(write_still=True)
-                    finally:
-                        scene.render.filepath = base_filepath
+                    if uses_compositor_output:
+                        bpy.ops.render.render()
+                    else:
+                        frame_output = bpy.path.abspath(scene.render.frame_path(frame=frame))
+                        scene.render.filepath = frame_output
+                        try:
+                            bpy.ops.render.render(write_still=True)
+                        finally:
+                            scene.render.filepath = base_filepath
                 if not valid_output(frame):
                     raise RuntimeError(f"Frame {frame} did not produce a non-empty output file.")
                 temporary_done = done_path(frame) + '.' + uuid.uuid4().hex + '.tmp'
@@ -166,7 +215,7 @@ def render_distributed():
                     json.dump({"completed_at": time.time(), "machine": socket.gethostname()}, done_file)
                 os.replace(temporary_done, done_path(frame))
                 reported.add(frame)
-                path = bpy.path.abspath(scene.render.frame_path(frame=frame))
+                path = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
                 print(f"BRH_FRAME_DONE:{frame}|{path}|{len(reported)}|{len(frames)}", flush=True)
             finally:
                 stop_heartbeat.set()

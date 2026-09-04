@@ -361,7 +361,8 @@ public partial class MainWindow : Window
                     DefaultStartFrame = scene.frame_start, DefaultEndFrame = scene.frame_end,
                     KeyframeStart = scene.camera_keyframes.GetValueOrDefault(name)?.start,
                     KeyframeEnd = scene.camera_keyframes.GetValueOrDefault(name)?.end,
-                    OutputPath = CameraOutputPath(scene.output_path, name), Engine = "KEEP", RenderMode = "FINAL",
+                    OutputPath = scene.uses_compositor_output ? scene.output_path : CameraOutputPath(scene.output_path, name), Engine = "KEEP", RenderMode = "FINAL",
+                    UsesCompositorOutput = scene.uses_compositor_output, CompositorOutputNode = scene.compositor_output_node ?? "",
                     Width = cameraResolution.resolution_x.ToString(CultureInfo.InvariantCulture), Height = cameraResolution.resolution_y.ToString(CultureInfo.InvariantCulture),
                     Scale = cameraResolution.resolution_percentage.ToString(CultureInfo.InvariantCulture),
                     FrameRate = scene.frame_rate.ToString("0.###", CultureInfo.InvariantCulture), Format = scene.file_format, TransparentBackground = scene.film_transparent,
@@ -376,7 +377,7 @@ public partial class MainWindow : Window
             UpdateCameraSelectionCount();
             AddQueueButton.IsEnabled = ContactSheetButton.IsEnabled = scene.cameras.Count > 0;
             StatusText.Text = scene.cameras.Count > 0 ? "Choose cameras and settings, then add them to the queue" : "No cameras found";
-            SetLog(scene.cameras.Count > 0 ? $"Scene ready · {scene.render_engine} · {scene.resolution_x}×{scene.resolution_y} · {scene.file_format}" : "This file has no camera objects.");
+            SetLog(scene.cameras.Count > 0 ? $"Scene ready · {scene.render_engine} · {scene.resolution_x}×{scene.resolution_y} · {scene.file_format}{(scene.uses_compositor_output ? $" · output from compositor node {scene.compositor_output_node}" : "")}" : "This file has no camera objects.");
         }
         catch (Exception ex) { CameraCountText.Text = "Inspection failed"; StatusText.Text = "Could not inspect file"; SetLog(ex.Message); }
     }
@@ -432,14 +433,7 @@ public partial class MainWindow : Window
 
     private void FrameRangeMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (sender == StillsOnlyCheckBox && StillsOnlyCheckBox.IsChecked == true) KeyframeRangeCheckBox.IsChecked = false;
-        if (sender == KeyframeRangeCheckBox && KeyframeRangeCheckBox.IsChecked == true) StillsOnlyCheckBox.IsChecked = false;
         ApplyFrameRangeMode();
-    }
-
-    private void StillFrameText_Changed(object sender, TextChangedEventArgs e)
-    {
-        if (StillsOnlyCheckBox?.IsChecked == true) ApplyFrameRangeMode();
     }
 
     private void SelectAll_Click(object sender, RoutedEventArgs e)
@@ -553,11 +547,6 @@ public partial class MainWindow : Window
 
     private void ApplyFrameRangeMode()
     {
-        if (StillsOnlyCheckBox?.IsChecked == true && int.TryParse(StillFrameText?.Text, out var stillFrame))
-        {
-            foreach (var camera in _cameras) { camera.StartFrame = stillFrame.ToString(CultureInfo.InvariantCulture); camera.EndFrame = camera.StartFrame; }
-            return;
-        }
         foreach (var camera in _cameras)
         {
             if (KeyframeRangeCheckBox?.IsChecked == true && camera.KeyframeStart.HasValue && camera.KeyframeEnd.HasValue)
@@ -592,6 +581,7 @@ public partial class MainWindow : Window
         if (!int.TryParse(c.Scale, out var scale) || scale is < 1 or > 32767) return $"{c.CameraName}: scale must be a positive whole number (maximum 32767).";
         if (!double.TryParse(c.FrameRate, NumberStyles.Float, CultureInfo.InvariantCulture, out var frameRate) || frameRate <= 0 || frameRate > 32767) return $"{c.CameraName}: frame rate must be a positive number (maximum 32767).";
         if (string.IsNullOrWhiteSpace(c.OutputPath)) return $"{c.CameraName}: output path is empty.";
+        if (c.UsesCompositorOutput && c.IgnoreCompositor) return $"{c.CameraName}: Ignore compositor cannot be enabled while using a compositor File Output path.";
         return null;
     }
 
@@ -641,7 +631,7 @@ public partial class MainWindow : Window
                 else
                 {
                     script = ExtractScript("render_scene.py");
-                    args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder];
+                    args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder, job.UsesCompositorOutput ? "1" : "0", job.CompositorOutputNode];
                 }
                 var code = await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
                 job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";
@@ -695,7 +685,7 @@ public partial class MainWindow : Window
     private void SetLog(string text) { LogBox.Text = text; EmptyLogText.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed; LogBox.ScrollToEnd(); }
     private void AppendLog(string text) { EmptyLogText.Visibility = Visibility.Collapsed; LogBox.AppendText(text + Environment.NewLine); LogBox.ScrollToEnd(); }
     private static string Tail(string value, int length) => value.Length <= length ? value : value[^length..];
-    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
+    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
     private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false);
@@ -724,6 +714,8 @@ public partial class MainWindow : Window
         public string ViewportShading { get; set; } = "SOLID";
         public bool Distributed { get; set; }
         public bool RequiresViewport { get; set; }
+        public bool UsesCompositorOutput { get; set; }
+        public string CompositorOutputNode { get; set; } = "";
         public bool PreRendered { get; set; }
         public string PreviewPath { get; set; } = "";
         public string SenderUser { get; set; } = "Unknown";
@@ -740,7 +732,8 @@ public partial class MainWindow : Window
             RenderMode = RenderMode, Overwrite = Overwrite, Placeholders = Placeholders, IgnoreCompositor = IgnoreCompositor,
             TransparentBackground = TransparentBackground, ViewportShading = ViewportShading,
             Distributed = Distributed && !string.IsNullOrWhiteSpace(coordinationFolder), JobId = JobId, CoordinationFolder = coordinationFolder ?? "",
-            PreRendered = PreRendered, RequiresViewport = RequiresViewport, ThumbnailPath = !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath) ? PreviewPath : null
+            PreRendered = PreRendered, RequiresViewport = RequiresViewport, UsesCompositorOutput = UsesCompositorOutput, CompositorOutputNode = CompositorOutputNode,
+            ThumbnailPath = !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath) ? PreviewPath : null
             };
             if (PreRendered)
             {
@@ -763,6 +756,9 @@ public class CameraSetup : NotifyBase
     public bool IsActive { get; set; }
     public string? ThumbnailPath { get; set; }
     public bool UsesPerCameraResolution { get; set; }
+    public bool UsesCompositorOutput { get; set; }
+    public string CompositorOutputNode { get; set; } = "";
+    public Visibility CompositorOutputVisibility => UsesCompositorOutput ? Visibility.Visible : Visibility.Collapsed;
     public Visibility PerCameraResolutionVisibility => UsesPerCameraResolution ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ActiveVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
     private string _startFrame = "1"; public string StartFrame { get => _startFrame; set => SetSetting(ref _startFrame, value); }
@@ -806,7 +802,7 @@ public class CameraSetup : NotifyBase
         RenderMode = job.RenderMode, Engine = job.Engine, OutputPath = job.OutputPath,
         Width = job.Width, Height = job.Height, Scale = job.Scale, FrameRate = job.FrameRate, Format = job.Format,
         Overwrite = job.Overwrite, Placeholders = job.Placeholders, IgnoreCompositor = job.IgnoreCompositor,
-        TransparentBackground = job.TransparentBackground
+        TransparentBackground = job.TransparentBackground, UsesCompositorOutput = job.UsesCompositorOutput, CompositorOutputNode = job.CompositorOutputNode
     };
 
     public void CopyAllSettingsFrom(CameraSetup source)
@@ -815,6 +811,7 @@ public class CameraSetup : NotifyBase
         RenderMode = source.RenderMode; ViewportShading = source.ViewportShading; Engine = source.Engine; OutputPath = source.OutputPath;
         Width = source.Width; Height = source.Height; Scale = source.Scale; FrameRate = source.FrameRate; Format = source.Format;
         Overwrite = source.Overwrite; Placeholders = source.Placeholders; IgnoreCompositor = source.IgnoreCompositor; TransparentBackground = source.TransparentBackground;
+        UsesCompositorOutput = source.UsesCompositorOutput; CompositorOutputNode = source.CompositorOutputNode;
     }
 
     public void CopySettingFrom(CameraSetup source, string propertyName)
@@ -846,6 +843,7 @@ public class RenderJob : NotifyBase
     public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG"; public string ViewportShading { get; init; } = "SOLID";
     public bool Distributed { get; init; } public string JobId { get; init; } = ""; public string CoordinationFolder { get; init; } = "";
     public bool PreRendered { get; init; } public bool RequiresViewport { get; init; }
+    public bool UsesCompositorOutput { get; init; } public string CompositorOutputNode { get; init; } = "";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
@@ -889,7 +887,7 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading, Distributed = false };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading, Distributed = false, UsesCompositorOutput = c.UsesCompositorOutput, CompositorOutputNode = c.CompositorOutputNode };
     private static string ResolveTokens(string template, string cameraName, string blendFile) => template
         .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
         .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);
