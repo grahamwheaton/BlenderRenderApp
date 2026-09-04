@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 0, 0),
+    "version": (5, 1, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -13,8 +13,6 @@ import getpass
 import json
 import os
 import socket
-import shutil
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -116,7 +114,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.0.0", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.1.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
@@ -138,46 +136,9 @@ def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None):
     return job
 
 
-def publish_cloud_job(job):
-    folder_text = clean_path(prefs().shared_queue_folder)
-    if not folder_text:
-        raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
-    folder = Path(folder_text)
-    folder.mkdir(parents=True, exist_ok=True)
-    filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
-    temporary = folder / ("." + filename + ".tmp")
-    temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(str(temporary), str(folder / filename))
-
-
-def copy_capture_frame(source, destination, overwrite):
-    destination_path = Path(destination)
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    if destination_path.is_file() and destination_path.stat().st_size > 0 and not overwrite:
-        return
-    last_error = None
-    for attempt in range(3):
-        temporary = destination_path.with_name(destination_path.name + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            shutil.copyfile(source, temporary)
-            os.replace(str(temporary), str(destination_path))
-            if destination_path.stat().st_size == 0:
-                raise RuntimeError(f"Copied viewport frame is empty: {destination}")
-            return
-        except Exception as error:
-            last_error = error
-            try:
-                temporary.unlink(missing_ok=True)
-            except Exception:
-                pass
-            if attempt < 2:
-                time.sleep(1 + attempt)
-    raise RuntimeError(f"Could not copy viewport frame to {destination}: {last_error}")
-
-
 class RENDERQUEUE_OT_cloud_render(Operator):
     bl_idname = "render.cloud_render"
-    bl_label = "Cloud Render (V5)"
+    bl_label = "Cloud Render (V5.1)"
     bl_description = "Send the active camera to every renderer watching the shared NAS queue"
 
     def execute(self, context):
@@ -192,70 +153,22 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
-    bl_label = "Cloud Playblast (V5)"
-    bl_description = "Capture the active camera through this 3D View and publish the completed viewport playblast"
+    bl_label = "Cloud Playblast (V5.1)"
+    bl_description = "Send a true viewport playblast job to a listening Blender Render app"
 
     def execute(self, context):
         try:
             if context.area is None or context.area.type != "VIEW_3D":
                 raise RuntimeError("Cloud Playblast must be run from the 3D View > View menu.")
-            scene = context.scene
-            if scene.render.image_settings.file_format == "FFMPEG":
+            if context.scene.render.image_settings.file_format == "FFMPEG":
                 raise RuntimeError("V5 Cloud Playblast currently requires an image format such as JPEG or PNG, not FFmpeg.")
-
             shading = getattr(getattr(context.space_data, "shading", None), "type", "SOLID")
-            # Validate/save the source before spending time capturing it.
-            job = build_job(context, "PLAYBLAST", shading)
-            region_3d = context.space_data.region_3d
-            window_region = next((region for region in context.area.regions if region.type == "WINDOW"), None)
-            if window_region is None:
-                raise RuntimeError("The active 3D View has no drawable window region.")
-            previous_perspective = region_3d.view_perspective
-            previous_frame = scene.frame_current
-            previous_filepath = scene.render.filepath
-            previous_transparent = scene.render.film_transparent
-            frames = range(scene.frame_start, scene.frame_end + 1, max(1, scene.frame_step))
-            destination_paths = {}
-            for frame in frames:
-                destination_paths[frame] = bpy.path.abspath(scene.render.frame_path(frame=frame))
-
-            with tempfile.TemporaryDirectory(prefix="blender_render_viewport_") as capture_folder:
-                try:
-                    # render.opengl with view_context=True is Blender's actual viewport
-                    # renderer. Run it here because a background Blender process has no
-                    # 3D View/window context to capture. Capture locally first so a brief
-                    # NAS interruption cannot abort Blender's viewport operation.
-                    scene.render.filepath = str(Path(capture_folder) / "frame_")
-                    scene.render.film_transparent = False
-                    region_3d.view_perspective = "CAMERA"
-                    with context.temp_override(area=context.area, region=window_region, space_data=context.space_data):
-                        result = bpy.ops.render.opengl(animation=True, view_context=True)
-                        if "FINISHED" not in result:
-                            raise RuntimeError("Blender cancelled the viewport capture.")
-
-                    for frame, destination in destination_paths.items():
-                        staged_frame = bpy.path.abspath(scene.render.frame_path(frame=frame))
-                        if not Path(staged_frame).is_file() or Path(staged_frame).stat().st_size == 0:
-                            raise RuntimeError(f"Viewport capture did not create frame {frame}.")
-                        copy_capture_frame(staged_frame, destination, job["overwrite"])
-                finally:
-                    scene.render.filepath = previous_filepath
-                    scene.render.film_transparent = previous_transparent
-                    region_3d.view_perspective = previous_perspective
-                    scene.frame_set(previous_frame)
-
-            last_frame = scene.frame_start + ((scene.frame_end - scene.frame_start) // max(1, scene.frame_step)) * max(1, scene.frame_step)
-            preview_path = destination_paths[last_frame]
-            if not Path(preview_path).is_file() or Path(preview_path).stat().st_size == 0:
-                raise RuntimeError("Viewport capture finished but the final output frame could not be found.")
-            job.update({
-                "version": 2,
+            job = write_cloud_job(context, "PLAYBLAST", shading, {
+                "version": 3,
                 "distributed": False,
-                "preRendered": True,
-                "previewPath": preview_path,
+                "requiresViewport": True,
             })
-            publish_cloud_job(job)
-            self.report({"INFO"}, f"Captured and published {job['cameraName']} viewport playblast")
+            self.report({"INFO"}, f"Sent {job['cameraName']} viewport playblast to the render queue")
             return {"FINISHED"}
         except Exception as error:
             self.report({"ERROR"}, str(error))

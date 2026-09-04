@@ -630,9 +630,20 @@ public partial class MainWindow : Window
             AppendLog($"\n[{job.CameraName}] {job.ModeSummary} · {job.FrameSummary}");
             try
             {
-                var script = ExtractScript("render_scene.py");
-                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder };
-                var code = await RunStreamingAsync(_blenderExe, args, job);
+                string script;
+                string[] args;
+                if (job.RequiresViewport)
+                {
+                    if (string.IsNullOrWhiteSpace(job.CoordinationFolder)) throw new InvalidOperationException("Viewport jobs require the shared NAS coordination folder.");
+                    script = ExtractScript("viewport_playblast.py");
+                    args = [job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.ViewportShading, job.Overwrite ? "1" : "0", job.JobId, job.CoordinationFolder];
+                }
+                else
+                {
+                    script = ExtractScript("render_scene.py");
+                    args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder];
+                }
+                var code = await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
                 job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";
                 if (code == 0 && !_cancelRequested) job.Finish();
             }
@@ -652,7 +663,7 @@ public partial class MainWindow : Window
         RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs";
     }
 
-    private static ProcessStartInfo MakeStartInfo(string exe, IEnumerable<string> args) { var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var arg in args) psi.ArgumentList.Add(arg); return psi; }
+    private static ProcessStartInfo MakeStartInfo(string exe, IEnumerable<string> args, bool hiddenWindow = false) { var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, WindowStyle = hiddenWindow ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal }; foreach (var arg in args) psi.ArgumentList.Add(arg); return psi; }
     private static async Task<string> RunCaptureAsync(string exe, IEnumerable<string> args, TimeSpan timeout)
     {
         using var process = new Process { StartInfo = MakeStartInfo(exe, args) }; process.Start();
@@ -660,9 +671,9 @@ public partial class MainWindow : Window
         try { await process.WaitForExitAsync(source.Token); } catch (OperationCanceledException) { try { process.Kill(true); } catch { } throw new TimeoutException($"Blender took longer than {timeout.TotalSeconds:0} seconds to inspect this file."); }
         var result = (await stdout) + "\n" + (await stderr); if (process.ExitCode != 0) throw new InvalidOperationException("Blender could not open the file.\n\n" + Tail(result, 1800)); return result;
     }
-    private async Task<int> RunStreamingAsync(string exe, IEnumerable<string> args, RenderJob job)
+    private async Task<int> RunStreamingAsync(string exe, IEnumerable<string> args, RenderJob job, bool hiddenWindow = false)
     {
-        _renderProcess = new Process { StartInfo = MakeStartInfo(exe, args), EnableRaisingEvents = true };
+        _renderProcess = new Process { StartInfo = MakeStartInfo(exe, args, hiddenWindow), EnableRaisingEvents = true };
         _renderProcess.OutputDataReceived += (_, e) =>
         {
             if (string.IsNullOrWhiteSpace(e.Data)) return;
@@ -712,6 +723,7 @@ public partial class MainWindow : Window
         public bool TransparentBackground { get; set; }
         public string ViewportShading { get; set; } = "SOLID";
         public bool Distributed { get; set; }
+        public bool RequiresViewport { get; set; }
         public bool PreRendered { get; set; }
         public string PreviewPath { get; set; } = "";
         public string SenderUser { get; set; } = "Unknown";
@@ -728,7 +740,7 @@ public partial class MainWindow : Window
             RenderMode = RenderMode, Overwrite = Overwrite, Placeholders = Placeholders, IgnoreCompositor = IgnoreCompositor,
             TransparentBackground = TransparentBackground, ViewportShading = ViewportShading,
             Distributed = Distributed && !string.IsNullOrWhiteSpace(coordinationFolder), JobId = JobId, CoordinationFolder = coordinationFolder ?? "",
-            PreRendered = PreRendered, ThumbnailPath = !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath) ? PreviewPath : null
+            PreRendered = PreRendered, RequiresViewport = RequiresViewport, ThumbnailPath = !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath) ? PreviewPath : null
             };
             if (PreRendered)
             {
@@ -833,7 +845,7 @@ public class RenderJob : NotifyBase
     public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string FrameStep { get; init; } = "1"; public string OutputPath { get; init; } = "";
     public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG"; public string ViewportShading { get; init; } = "SOLID";
     public bool Distributed { get; init; } public string JobId { get; init; } = ""; public string CoordinationFolder { get; init; } = "";
-    public bool PreRendered { get; init; }
+    public bool PreRendered { get; init; } public bool RequiresViewport { get; init; }
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
@@ -843,7 +855,7 @@ public class RenderJob : NotifyBase
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
     private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
     public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
-    public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return PreRendered ? summary + " · Viewport capture" : Distributed ? summary + " · NAS claims" : summary; } }
+    public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return RequiresViewport ? summary + " · True viewport worker" : PreRendered ? summary + " · Viewport capture" : Distributed ? summary + " · NAS claims" : summary; } }
     public string ProgressLabel => _currentFrame.HasValue && _completedFrames.HasValue && _totalFrames.HasValue
         ? $"Frame {_currentFrame} · {_completedFrames} / {_totalFrames} complete · {Progress:0}%"
         : _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
