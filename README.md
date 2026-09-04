@@ -57,3 +57,9 @@ Every machine must be able to access the `.blend` and output paths, preferably t
 V4 Cloud jobs use app-managed NAS frame claims instead of Blender placeholders. Each watching machine claims one available frame at a time, renders it with placeholders disabled internally, verifies that the output is non-empty, records completion, and then claims another frame. A claim heartbeat prevents long frames from being stolen; abandoned claims become available again after two minutes. The incoming Overwrite setting controls whether valid images that existed before this job are kept or rendered again, but it is no longer used for machine-to-machine coordination.
 
 Watch Mode also scans existing V4 jobs when it starts. A machine can therefore join a render after the original Cloud Render or Cloud Playblast was sent. Jobs with a shared `complete.json` marker are ignored, while older V3 job files are not re-queued. Distributed rendering requires an image-sequence format; FFmpeg output is rejected.
+
+## V5 true viewport playblast
+
+V5 Cloud Playblast uses Blender's real viewport renderer in the open sending Blender session. It captures the active camera with the current 3D View shading, overlays, lighting and viewport settings by calling Blender's `render.opengl` viewport operation. The completed image sequence is then published to the NAS queue and appears as a completed, reviewable job in every app already in Watch Mode. It is not rendered again by the headless workers.
+
+Run it from **3D View > View > Cloud Playblast**. V5 currently requires an image sequence format such as JPEG or PNG; FFmpeg is deliberately rejected so the app can verify and preview the output. Cloud Render remains the distributed V4 headless render workflow.

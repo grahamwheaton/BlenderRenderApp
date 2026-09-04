@@ -187,9 +187,9 @@ public partial class MainWindow : Window
         _receivedJobIds.Add(incoming.JobId);
         var job = incoming.ToRenderJob(coordinationFolder);
         _queue.Add(job); UpdateQueueState();
-        ResetAutoStartCountdown();
-        StatusText.Text = $"{source} job received · {job.CameraName}";
-        AppendLog($"{source} Watch job received from {incoming.SenderUser}@{incoming.SenderMachine}: {job.BlendFile} · {job.CameraName}");
+        if (job.Status == "Waiting") ResetAutoStartCountdown();
+        StatusText.Text = incoming.PreRendered ? $"{source} viewport playblast received · {job.CameraName}" : $"{source} job received · {job.CameraName}";
+        AppendLog($"{source} Watch job received from {incoming.SenderUser}@{incoming.SenderMachine}: {job.BlendFile} · {job.CameraName}{(incoming.PreRendered ? " · viewport capture complete" : "")}");
         return true;
     }
 
@@ -699,19 +699,31 @@ public partial class MainWindow : Window
         public bool TransparentBackground { get; set; }
         public string ViewportShading { get; set; } = "SOLID";
         public bool Distributed { get; set; }
+        public bool PreRendered { get; set; }
+        public string PreviewPath { get; set; } = "";
         public string SenderUser { get; set; } = "Unknown";
         public string SenderMachine { get; set; } = "Unknown";
 
-        public RenderJob ToRenderJob(string? coordinationFolder) => new()
+        public RenderJob ToRenderJob(string? coordinationFolder)
         {
+            var job = new RenderJob
+            {
             BlendFile = BlendFile, CameraName = CameraName, StartFrame = StartFrame.ToString(CultureInfo.InvariantCulture),
             EndFrame = EndFrame.ToString(CultureInfo.InvariantCulture), FrameStep = Math.Max(1, FrameStep).ToString(CultureInfo.InvariantCulture),
             OutputPath = OutputPath, Engine = Engine, Width = Width.ToString(CultureInfo.InvariantCulture), Height = Height.ToString(CultureInfo.InvariantCulture),
             Scale = Scale.ToString(CultureInfo.InvariantCulture), FrameRate = FrameRate.ToString("0.###", CultureInfo.InvariantCulture), Format = Format,
             RenderMode = RenderMode, Overwrite = Overwrite, Placeholders = Placeholders, IgnoreCompositor = IgnoreCompositor,
             TransparentBackground = TransparentBackground, ViewportShading = ViewportShading,
-            Distributed = Distributed && !string.IsNullOrWhiteSpace(coordinationFolder), JobId = JobId, CoordinationFolder = coordinationFolder ?? ""
-        };
+            Distributed = Distributed && !string.IsNullOrWhiteSpace(coordinationFolder), JobId = JobId, CoordinationFolder = coordinationFolder ?? "",
+            PreRendered = PreRendered, ThumbnailPath = !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath) ? PreviewPath : null
+            };
+            if (PreRendered)
+            {
+                job.Status = "Complete";
+                job.Finish();
+            }
+            return job;
+        }
     }
 }
 
@@ -808,19 +820,22 @@ public class RenderJob : NotifyBase
     public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string FrameStep { get; init; } = "1"; public string OutputPath { get; init; } = "";
     public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG"; public string ViewportShading { get; init; } = "SOLID";
     public bool Distributed { get; init; } public string JobId { get; init; } = ""; public string CoordinationFolder { get; init; } = "";
+    public bool PreRendered { get; init; }
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
     private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
-    private DateTime _startedAt; private int _lastReportedFrame = int.MinValue; private int? _currentFrame;
+    private DateTime _startedAt; private int _lastReportedFrame = int.MinValue; private int? _currentFrame; private int? _completedFrames; private int? _totalFrames;
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
     private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
     public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
-    public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return Distributed ? summary + " · NAS claims" : summary; } }
-    public string ProgressLabel => _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
+    public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return PreRendered ? summary + " · Viewport capture" : Distributed ? summary + " · NAS claims" : summary; } }
+    public string ProgressLabel => _currentFrame.HasValue && _completedFrames.HasValue && _totalFrames.HasValue
+        ? $"Frame {_currentFrame} · {_completedFrames} / {_totalFrames} complete · {Progress:0}%"
+        : _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
-    public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; _currentFrame = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
+    public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame, string? renderedPath, int? sharedCompleted = null, int? sharedTotal = null)
     {
         if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
@@ -831,6 +846,8 @@ public class RenderJob : NotifyBase
         var total = Math.Max(1, (end - start) / step + 1);
         var completed = sharedCompleted.HasValue && sharedTotal.HasValue ? Math.Clamp(sharedCompleted.Value, 0, Math.Max(1, sharedTotal.Value)) : Math.Clamp((frame - start) / step + 1, 0, total);
         if (sharedTotal.HasValue) total = Math.Max(1, sharedTotal.Value);
+        _completedFrames = sharedCompleted.HasValue ? completed : null;
+        _totalFrames = sharedTotal.HasValue ? total : null;
         Progress = 100.0 * completed / total;
         OnPropertyChanged(nameof(ProgressLabel));
         if (!string.IsNullOrWhiteSpace(renderedPath) && (completed % 10 == 0 || frame >= end) && File.Exists(renderedPath)) ThumbnailPath = renderedPath;

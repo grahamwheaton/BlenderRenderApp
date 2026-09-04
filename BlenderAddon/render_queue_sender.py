@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (3, 0, 0),
+    "version": (5, 0, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -119,18 +119,32 @@ class RENDERQUEUE_Preferences(AddonPreferences):
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
-def write_cloud_job(context, render_mode, viewport_shading="SOLID"):
+def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None):
     folder_text = clean_path(prefs().shared_queue_folder)
     if not folder_text:
         raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
     folder = Path(folder_text)
     folder.mkdir(parents=True, exist_ok=True)
     job = build_job(context, render_mode, viewport_shading)
+    if extra:
+        job.update(extra)
     filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
     temporary = folder / ("." + filename + ".tmp")
     temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(str(temporary), str(folder / filename))
     return job
+
+
+def publish_cloud_job(job):
+    folder_text = clean_path(prefs().shared_queue_folder)
+    if not folder_text:
+        raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
+    folder = Path(folder_text)
+    folder.mkdir(parents=True, exist_ok=True)
+    filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
+    temporary = folder / ("." + filename + ".tmp")
+    temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(temporary), str(folder / filename))
 
 
 class RENDERQUEUE_OT_cloud_render(Operator):
@@ -151,13 +165,50 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
     bl_label = "Cloud Playblast"
-    bl_description = "Send an active-camera Workbench playblast to every renderer watching the shared NAS queue"
+    bl_description = "Capture the active camera through this 3D View and publish the completed viewport playblast"
 
     def execute(self, context):
         try:
+            if context.area is None or context.area.type != "VIEW_3D":
+                raise RuntimeError("Cloud Playblast must be run from the 3D View > View menu.")
+            scene = context.scene
+            if scene.render.image_settings.file_format == "FFMPEG":
+                raise RuntimeError("V5 Cloud Playblast currently requires an image format such as JPEG or PNG, not FFmpeg.")
+
             shading = getattr(getattr(context.space_data, "shading", None), "type", "SOLID")
-            job = write_cloud_job(context, "PLAYBLAST", shading)
-            self.report({"INFO"}, f"Sent {job['cameraName']} as a Cloud Playblast")
+            # Validate/save the source before spending time capturing it.
+            job = build_job(context, "PLAYBLAST", shading)
+            region_3d = context.space_data.region_3d
+            window_region = next((region for region in context.area.regions if region.type == "WINDOW"), None)
+            if window_region is None:
+                raise RuntimeError("The active 3D View has no drawable window region.")
+            previous_perspective = region_3d.view_perspective
+            previous_frame = scene.frame_current
+            try:
+                # render.opengl with view_context=True is Blender's actual viewport
+                # renderer. Run it here because a background Blender process has no
+                # 3D View/window context to capture.
+                region_3d.view_perspective = "CAMERA"
+                with context.temp_override(area=context.area, region=window_region, space_data=context.space_data):
+                    result = bpy.ops.render.opengl(animation=True, view_context=True)
+                    if "FINISHED" not in result:
+                        raise RuntimeError("Blender cancelled the viewport capture.")
+            finally:
+                region_3d.view_perspective = previous_perspective
+                scene.frame_set(previous_frame)
+
+            last_frame = scene.frame_start + ((scene.frame_end - scene.frame_start) // max(1, scene.frame_step)) * max(1, scene.frame_step)
+            preview_path = bpy.path.abspath(scene.render.frame_path(frame=last_frame))
+            if not Path(preview_path).is_file() or Path(preview_path).stat().st_size == 0:
+                raise RuntimeError("Viewport capture finished but the final output frame could not be found.")
+            job.update({
+                "version": 2,
+                "distributed": False,
+                "preRendered": True,
+                "previewPath": preview_path,
+            })
+            publish_cloud_job(job)
+            self.report({"INFO"}, f"Captured and published {job['cameraName']} viewport playblast")
             return {"FINISHED"}
         except Exception as error:
             self.report({"ERROR"}, str(error))
