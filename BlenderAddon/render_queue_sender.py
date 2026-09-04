@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 2, 0),
+    "version": (5, 2, 1),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -114,7 +114,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.2.0", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.2.1", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
@@ -138,7 +138,7 @@ def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None):
 
 class RENDERQUEUE_OT_cloud_render(Operator):
     bl_idname = "render.cloud_render"
-    bl_label = "Cloud Render (V5.2)"
+    bl_label = "Cloud Render (V5.2.1)"
     bl_description = "Send the active camera to every renderer watching the shared NAS queue"
 
     def execute(self, context):
@@ -153,7 +153,7 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
-    bl_label = "Cloud Playblast (V5.2)"
+    bl_label = "Cloud Playblast (V5.2.1)"
     bl_description = "Send a true viewport playblast job to a listening Blender Render app"
 
     def execute(self, context):

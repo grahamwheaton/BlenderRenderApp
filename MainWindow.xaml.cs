@@ -851,7 +851,7 @@ public class RenderJob : NotifyBase
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
     private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
-    private DateTime _startedAt; private int _lastReportedFrame = int.MinValue; private int? _currentFrame; private int? _completedFrames; private int? _totalFrames;
+    private DateTime _startedAt; private DateTime _lastThumbnailUpdate; private int _lastReportedFrame = int.MinValue; private int? _currentFrame; private int? _completedFrames; private int? _totalFrames;
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
     private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
     public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
@@ -860,7 +860,7 @@ public class RenderJob : NotifyBase
         ? $"Frame {_currentFrame} · {_completedFrames} / {_totalFrames} complete · {Progress:0}%"
         : _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
-    public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
+    public void Begin() { _startedAt = DateTime.Now; _lastThumbnailUpdate = DateTime.MinValue; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame, string? renderedPath, int? sharedCompleted = null, int? sharedTotal = null)
     {
         if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
@@ -875,7 +875,12 @@ public class RenderJob : NotifyBase
         _totalFrames = sharedTotal.HasValue ? total : null;
         Progress = 100.0 * completed / total;
         OnPropertyChanged(nameof(ProgressLabel));
-        if (!string.IsNullOrWhiteSpace(renderedPath) && (completed % 10 == 0 || frame >= end) && File.Exists(renderedPath)) ThumbnailPath = renderedPath;
+        var now = DateTime.Now;
+        if (!string.IsNullOrWhiteSpace(renderedPath) && (now - _lastThumbnailUpdate >= TimeSpan.FromSeconds(10) || completed >= total) && File.Exists(renderedPath))
+        {
+            ThumbnailPath = renderedPath;
+            _lastThumbnailUpdate = now;
+        }
         if (completed < 1) { Estimate = "Estimating…"; return; }
         var elapsed = DateTime.Now - _startedAt;
         var remaining = TimeSpan.FromTicks((long)(elapsed.Ticks / (double)completed * (total - completed)));
