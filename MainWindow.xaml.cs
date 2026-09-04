@@ -113,7 +113,7 @@ public partial class MainWindow : Window
         if (_queueRunning) return;
         _blendFile = path;
         DropTitleText.Text = Path.GetFileName(path); DropSubtitleText.Text = path; DropSubtitleText.ToolTip = path;
-        _cameras.Clear(); SelectAllCheckBox.IsChecked = false; AddQueueButton.IsEnabled = false; CameraCountText.Text = "Inspecting…";
+        _cameras.Clear(); AddQueueButton.IsEnabled = false; CameraCountText.Text = "Inspecting…";
         if (_blenderExe is null) { StatusText.Text = "Choose blender.exe to inspect this file"; return; }
         StatusText.Text = "Reading cameras and generating previews…"; SetLog("Inspecting the Blender file and rendering camera thumbnails…");
         try
@@ -197,6 +197,16 @@ public partial class MainWindow : Window
         combo.SelectedIndex = 0;
     }
 
+    private void CopyOutputToSelection_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not CameraSetup source) return;
+        var targets = _cameras.Where(camera => camera != source && camera.IsChecked).ToList();
+        foreach (var camera in targets) camera.OutputPath = source.OutputPath;
+        StatusText.Text = targets.Count == 0
+            ? "No other selected cameras"
+            : $"Output copied to {targets.Count} selected camera{(targets.Count == 1 ? "" : "s")}";
+    }
+
     private void FrameRangeMode_Changed(object sender, RoutedEventArgs e)
     {
         if (sender == StillsOnlyCheckBox && StillsOnlyCheckBox.IsChecked == true) KeyframeRangeCheckBox.IsChecked = false;
@@ -209,15 +219,13 @@ public partial class MainWindow : Window
         if (StillsOnlyCheckBox?.IsChecked == true) ApplyFrameRangeMode();
     }
 
-    private void SelectAll_Changed(object sender, RoutedEventArgs e)
+    private void SelectAll_Click(object sender, RoutedEventArgs e)
     {
-        var isChecked = SelectAllCheckBox?.IsChecked == true;
-        foreach (var camera in _cameras) camera.IsChecked = isChecked;
+        foreach (var camera in _cameras) camera.IsChecked = true;
     }
 
     private void ClearSelection_Click(object sender, RoutedEventArgs e)
     {
-        SelectAllCheckBox.IsChecked = false;
         foreach (var camera in _cameras) camera.IsChecked = false;
     }
 
