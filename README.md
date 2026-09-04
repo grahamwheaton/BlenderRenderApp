@@ -50,4 +50,10 @@ The partner add-on is in `BlenderAddon/render_queue_sender.py`. Install it in Bl
 
 Cloud Playblast records the active 3D View shading mode (`Wireframe`, `Solid`, `Material Preview`, or `Rendered`) in the queued job. During rendering, queue progress shows the current frame and refreshes the queue thumbnail from a newly written output image every 10 frames and on the final frame.
 
-For cooperative rendering from multiple machines, enable **Placeholders** and disable **Overwrite** in Blender before sending the Cloud job. Every machine must be able to access the `.blend` and output paths, preferably through consistent UNC NAS paths.
+Every machine must be able to access the `.blend` and output paths, preferably through consistent UNC NAS paths. V4 Cloud jobs do not depend on the Blender **Overwrite** or **Placeholders** settings for coordination.
+
+## V4 NAS frame claims
+
+V4 Cloud jobs use app-managed NAS frame claims instead of Blender placeholders. Each watching machine claims one available frame at a time, renders it with placeholders disabled internally, verifies that the output is non-empty, records completion, and then claims another frame. A claim heartbeat prevents long frames from being stolen; abandoned claims become available again after two minutes. The incoming Overwrite setting controls whether valid images that existed before this job are kept or rendered again, but it is no longer used for machine-to-machine coordination.
+
+Watch Mode also scans existing V4 jobs when it starts. A machine can therefore join a render after the original Cloud Render or Cloud Playblast was sent. Jobs with a shared `complete.json` marker are ignored, while older V3 job files are not re-queued. Distributed rendering requires an image-sequence format; FFmpeg output is rejected.

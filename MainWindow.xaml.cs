@@ -32,7 +32,7 @@ public partial class MainWindow : Window
     private CameraSetup? _selectedCamera;
     private CameraSetup? _copiedCameraSettings;
     private const string Marker = "BRH_JSON:";
-    private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)(?:\|(.*))?", RegexOptions.Compiled);
+    private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)(?:\|([^|]*))?(?:\|(\d+)\|(\d+))?", RegexOptions.Compiled);
     private const int LocalWatchPort = 43129;
     private const string DefaultCloudQueueFolder = @"W:\Working Graphics\_3D RESOURCE\CloudRender";
     private readonly DispatcherTimer _watchTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -88,8 +88,12 @@ public partial class MainWindow : Window
             _localListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, LocalWatchPort));
             _seenCloudFiles.Clear();
             if (!string.IsNullOrWhiteSpace(_cloudQueueFolder) && Directory.Exists(_cloudQueueFolder))
-                foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json")) _seenCloudFiles.Add(file);
+            {
+                foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json"))
+                    if (!IsDistributedJobFile(file)) _seenCloudFiles.Add(file);
+            }
             _watchTimer.Start();
+            PollCloudJobs();
             _ = ReceiveLocalJobsAsync(_watchCancellation.Token);
             StatusText.Text = string.IsNullOrWhiteSpace(_cloudQueueFolder)
                 ? $"Watch mode · local machine on port {LocalWatchPort} · choose a NAS folder for Cloud"
@@ -155,27 +159,33 @@ public partial class MainWindow : Window
             foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").OrderBy(File.GetCreationTimeUtc))
             {
                 if (!_seenCloudFiles.Add(file)) continue;
-                try { QueueIncomingJob(File.ReadAllText(file, Encoding.UTF8), "Cloud"); }
+                try { QueueIncomingJob(File.ReadAllText(file, Encoding.UTF8), "Cloud", file); }
                 catch (Exception ex) { AppendLog($"Could not read NAS job {Path.GetFileName(file)}: {ex.Message}"); }
             }
         }
         catch (Exception ex) { AppendLog($"NAS queue error: {ex.Message}"); }
     }
 
-    private bool QueueIncomingJob(string json, string source)
+    private bool QueueIncomingJob(string json, string source, string? cloudJobFile = null)
     {
         IncomingRenderJob? incoming;
         try { incoming = JsonSerializer.Deserialize<IncomingRenderJob>(json, JobJsonOptions); }
         catch (JsonException ex) { AppendLog($"Rejected {source} job: {ex.Message}"); return false; }
         if (incoming is null || string.IsNullOrWhiteSpace(incoming.JobId)) return false;
         if (_receivedJobIds.Contains(incoming.JobId)) return true;
+        var coordinationFolder = cloudJobFile is null ? null : Path.GetDirectoryName(cloudJobFile);
+        if (incoming.Distributed && !string.IsNullOrWhiteSpace(coordinationFolder) && File.Exists(Path.Combine(coordinationFolder, "_claims", SafeJobId(incoming.JobId), "complete.json")))
+        {
+            _receivedJobIds.Add(incoming.JobId);
+            return true;
+        }
         if (!Path.GetExtension(incoming.BlendFile).Equals(".blend", StringComparison.OrdinalIgnoreCase) || !File.Exists(incoming.BlendFile))
         {
             AppendLog($"Rejected {source} job {incoming.JobId}: blend file is not accessible: {incoming.BlendFile}");
             return false;
         }
         _receivedJobIds.Add(incoming.JobId);
-        var job = incoming.ToRenderJob();
+        var job = incoming.ToRenderJob(coordinationFolder);
         _queue.Add(job); UpdateQueueState();
         ResetAutoStartCountdown();
         StatusText.Text = $"{source} job received · {job.CameraName}";
@@ -191,8 +201,26 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(_cloudQueueFolder);
         SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true));
         _seenCloudFiles.Clear();
-        foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json")) _seenCloudFiles.Add(file);
+        foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json"))
+            if (!IsDistributedJobFile(file)) _seenCloudFiles.Add(file);
+        if (WatchModeCheckBox.IsChecked == true) PollCloudJobs();
         StatusText.Text = $"NAS queue folder · {_cloudQueueFolder}";
+    }
+
+    private static bool IsDistributedJobFile(string file)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(file, Encoding.UTF8));
+            return document.RootElement.TryGetProperty("distributed", out var value) && value.ValueKind == JsonValueKind.True;
+        }
+        catch { return false; }
+    }
+
+    private static string SafeJobId(string value)
+    {
+        var safe = string.Concat(value.Where(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.'));
+        return string.IsNullOrWhiteSpace(safe) ? "invalid-job" : safe;
     }
 
     private void AutoStart_Changed(object sender, RoutedEventArgs e)
@@ -590,7 +618,7 @@ public partial class MainWindow : Window
             try
             {
                 var script = ExtractScript("render_scene.py");
-                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading };
+                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder };
                 var code = await RunStreamingAsync(_blenderExe, args, job);
                 job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";
                 if (code == 0 && !_cancelRequested) job.Finish();
@@ -629,7 +657,12 @@ public partial class MainWindow : Window
             {
                 AppendLog(e.Data);
                 var match = FramePattern.Match(e.Data);
-                if (match.Success && int.TryParse(match.Groups[1].Value, out var frame)) job.ReportFrame(frame, match.Groups[2].Value);
+                if (match.Success && int.TryParse(match.Groups[1].Value, out var frame))
+                {
+                    int? completed = int.TryParse(match.Groups[3].Value, out var parsedCompleted) ? parsedCompleted : null;
+                    int? total = int.TryParse(match.Groups[4].Value, out var parsedTotal) ? parsedTotal : null;
+                    job.ReportFrame(frame, match.Groups[2].Value, completed, total);
+                }
             });
         };
         _renderProcess.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Dispatcher.Invoke(() => AppendLog(e.Data)); };
@@ -665,17 +698,19 @@ public partial class MainWindow : Window
         public bool IgnoreCompositor { get; set; }
         public bool TransparentBackground { get; set; }
         public string ViewportShading { get; set; } = "SOLID";
+        public bool Distributed { get; set; }
         public string SenderUser { get; set; } = "Unknown";
         public string SenderMachine { get; set; } = "Unknown";
 
-        public RenderJob ToRenderJob() => new()
+        public RenderJob ToRenderJob(string? coordinationFolder) => new()
         {
             BlendFile = BlendFile, CameraName = CameraName, StartFrame = StartFrame.ToString(CultureInfo.InvariantCulture),
             EndFrame = EndFrame.ToString(CultureInfo.InvariantCulture), FrameStep = Math.Max(1, FrameStep).ToString(CultureInfo.InvariantCulture),
             OutputPath = OutputPath, Engine = Engine, Width = Width.ToString(CultureInfo.InvariantCulture), Height = Height.ToString(CultureInfo.InvariantCulture),
             Scale = Scale.ToString(CultureInfo.InvariantCulture), FrameRate = FrameRate.ToString("0.###", CultureInfo.InvariantCulture), Format = Format,
             RenderMode = RenderMode, Overwrite = Overwrite, Placeholders = Placeholders, IgnoreCompositor = IgnoreCompositor,
-            TransparentBackground = TransparentBackground, ViewportShading = ViewportShading
+            TransparentBackground = TransparentBackground, ViewportShading = ViewportShading,
+            Distributed = Distributed && !string.IsNullOrWhiteSpace(coordinationFolder), JobId = JobId, CoordinationFolder = coordinationFolder ?? ""
         };
     }
 }
@@ -772,6 +807,7 @@ public class RenderJob : NotifyBase
 {
     public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string FrameStep { get; init; } = "1"; public string OutputPath { get; init; } = "";
     public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG"; public string ViewportShading { get; init; } = "SOLID";
+    public bool Distributed { get; init; } public string JobId { get; init; } = ""; public string CoordinationFolder { get; init; } = "";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
@@ -781,18 +817,20 @@ public class RenderJob : NotifyBase
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
     private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
     public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
-    public string SettingsSummary => RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}";
+    public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return Distributed ? summary + " · NAS claims" : summary; } }
     public string ProgressLabel => _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
     public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; _currentFrame = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
-    public void ReportFrame(int frame, string? renderedPath)
+    public void ReportFrame(int frame, string? renderedPath, int? sharedCompleted = null, int? sharedTotal = null)
     {
-        if (frame <= _lastReportedFrame || !int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
+        if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
+        if (!sharedCompleted.HasValue && frame <= _lastReportedFrame) return;
         _lastReportedFrame = frame;
         _currentFrame = frame;
         var step = int.TryParse(FrameStep, out var parsedStep) ? Math.Max(1, parsedStep) : 1;
         var total = Math.Max(1, (end - start) / step + 1);
-        var completed = Math.Clamp((frame - start) / step + 1, 0, total);
+        var completed = sharedCompleted.HasValue && sharedTotal.HasValue ? Math.Clamp(sharedCompleted.Value, 0, Math.Max(1, sharedTotal.Value)) : Math.Clamp((frame - start) / step + 1, 0, total);
+        if (sharedTotal.HasValue) total = Math.Max(1, sharedTotal.Value);
         Progress = 100.0 * completed / total;
         OnPropertyChanged(nameof(ProgressLabel));
         if (!string.IsNullOrWhiteSpace(renderedPath) && (completed % 10 == 0 || frame >= end) && File.Exists(renderedPath)) ThumbnailPath = renderedPath;
@@ -804,7 +842,7 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading, Distributed = false };
     private static string ResolveTokens(string template, string cameraName, string blendFile) => template
         .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
         .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);

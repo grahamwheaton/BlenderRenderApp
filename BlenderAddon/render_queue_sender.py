@@ -86,6 +86,7 @@ def build_job(context, render_mode, viewport_shading="SOLID"):
         "format": scene.render.image_settings.file_format,
         "renderMode": render_mode,
         "viewportShading": viewport_shading,
+        "distributed": True,
         "overwrite": bool(scene.render.use_overwrite),
         "placeholders": bool(scene.render.use_placeholder),
         "ignoreCompositor": not bool(scene.render.use_compositing),

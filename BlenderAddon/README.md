@@ -8,4 +8,4 @@ Install `render_queue_sender.py` as a Blender add-on.
 
 Set the same NAS folder in the add-on preferences and with the folder button beside **Watch mode** in the desktop app. Jobs reference the existing `.blend` and output paths; they do not copy the Blender file.
 
-For cooperative rendering on several computers, enable Blender's **Placeholders** setting and disable **Overwrite** before sending the job.
+V4 coordinates shared rendering with NAS frame-claim files. **Placeholders** is not used for Cloud frame allocation. **Overwrite** only controls whether valid images that already existed before the new job are retained or rendered again.
