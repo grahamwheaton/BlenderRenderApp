@@ -4,7 +4,7 @@ import os
 import sys
 
 args = sys.argv[sys.argv.index("--") + 1:]
-camera_name, start_text, end_text, step_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor, transparent_background = args
+camera_name, start_text, end_text, step_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor, transparent_background, viewport_shading = args
 camera = bpy.data.objects.get(camera_name)
 if camera is None or camera.type != 'CAMERA':
     raise RuntimeError(f"Camera not found: {camera_name}")
@@ -15,9 +15,21 @@ scene.frame_start = int(start_text)
 scene.frame_end = int(end_text)
 scene.frame_step = int(step_text)
 scene.render.filepath = output_path
-if render_mode == 'PLAYBLAST':
+if render_mode == 'PLAYBLAST' and viewport_shading == 'RENDERED':
+    if engine != 'KEEP':
+        scene.render.engine = engine
+    scene.render.use_compositing = False
+elif render_mode == 'PLAYBLAST' and viewport_shading == 'MATERIAL':
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+    scene.render.use_compositing = False
+elif render_mode == 'PLAYBLAST':
     scene.render.engine = 'BLENDER_WORKBENCH'
     scene.render.use_compositing = False
+    if viewport_shading == 'WIREFRAME':
+        scene.display.shading.light = 'FLAT'
+        scene.display.shading.show_shadows = False
+        scene.display.shading.show_cavity = False
+        scene.display.shading.show_outline = True
 elif engine != 'KEEP':
     scene.render.engine = engine
 scene.render.resolution_x = int(width)
@@ -42,7 +54,8 @@ if hasattr(camera.data, 'per_camera_resolution'):
 scene.render.image_settings.file_format = file_format
 print(f"BRH: Mode {render_mode} | camera {camera_name} | frames {scene.frame_start}-{scene.frame_end} step {scene.frame_step} | {scene.render.resolution_x}x{scene.render.resolution_y} at {scene.render.resolution_percentage}% | {scene.render.fps / scene.render.fps_base:g} fps | {scene.render.engine} | {scene.render.image_settings.file_format} | overwrite={scene.render.use_overwrite} | placeholders={scene.render.use_placeholder} | compositor={scene.render.use_compositing} | transparent={scene.render.film_transparent} | output {scene.render.filepath}")
 def report_completed_frame(render_scene):
-    print(f"BRH_FRAME_DONE:{render_scene.frame_current}", flush=True)
+    rendered_path = bpy.path.abspath(render_scene.render.frame_path(frame=render_scene.frame_current))
+    print(f"BRH_FRAME_DONE:{render_scene.frame_current}|{rendered_path}", flush=True)
 
 bpy.app.handlers.render_write.append(report_completed_frame)
 bpy.ops.render.render(animation=True)

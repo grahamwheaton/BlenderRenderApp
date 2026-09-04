@@ -32,7 +32,7 @@ public partial class MainWindow : Window
     private CameraSetup? _selectedCamera;
     private CameraSetup? _copiedCameraSettings;
     private const string Marker = "BRH_JSON:";
-    private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)", RegexOptions.Compiled);
+    private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)(?:\|(.*))?", RegexOptions.Compiled);
     private const int LocalWatchPort = 43129;
     private const string DefaultCloudQueueFolder = @"W:\Working Graphics\_3D RESOURCE\CloudRender";
     private readonly DispatcherTimer _watchTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -488,6 +488,7 @@ public partial class MainWindow : Window
     private void UpdateRenderModeButtons()
     {
         var finalSelected = _selectedCamera?.RenderMode != "PLAYBLAST";
+        PlayblastButton.Content = _selectedCamera?.RenderMode == "PLAYBLAST" ? $"PLAYBLAST · {_selectedCamera.ViewportShadingLabel.ToUpperInvariant()}" : "PLAYBLAST";
         FinalRenderButton.Background = new SolidColorBrush(finalSelected ? Color.FromRgb(0x3A, 0x30, 0x2A) : Color.FromRgb(0x34, 0x3A, 0x44));
         FinalRenderButton.BorderBrush = finalSelected ? (Brush)FindResource("Accent") : Brushes.Transparent;
         FinalRenderButton.BorderThickness = finalSelected ? new Thickness(1) : new Thickness(0);
@@ -589,7 +590,7 @@ public partial class MainWindow : Window
             try
             {
                 var script = ExtractScript("render_scene.py");
-                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0" };
+                var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading };
                 var code = await RunStreamingAsync(_blenderExe, args, job);
                 job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";
                 if (code == 0 && !_cancelRequested) job.Finish();
@@ -628,7 +629,7 @@ public partial class MainWindow : Window
             {
                 AppendLog(e.Data);
                 var match = FramePattern.Match(e.Data);
-                if (match.Success && int.TryParse(match.Groups[1].Value, out var frame)) job.ReportFrame(frame);
+                if (match.Success && int.TryParse(match.Groups[1].Value, out var frame)) job.ReportFrame(frame, match.Groups[2].Value);
             });
         };
         _renderProcess.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Dispatcher.Invoke(() => AppendLog(e.Data)); };
@@ -663,6 +664,7 @@ public partial class MainWindow : Window
         public bool Placeholders { get; set; }
         public bool IgnoreCompositor { get; set; }
         public bool TransparentBackground { get; set; }
+        public string ViewportShading { get; set; } = "SOLID";
         public string SenderUser { get; set; } = "Unknown";
         public string SenderMachine { get; set; } = "Unknown";
 
@@ -673,7 +675,7 @@ public partial class MainWindow : Window
             OutputPath = OutputPath, Engine = Engine, Width = Width.ToString(CultureInfo.InvariantCulture), Height = Height.ToString(CultureInfo.InvariantCulture),
             Scale = Scale.ToString(CultureInfo.InvariantCulture), FrameRate = FrameRate.ToString("0.###", CultureInfo.InvariantCulture), Format = Format,
             RenderMode = RenderMode, Overwrite = Overwrite, Placeholders = Placeholders, IgnoreCompositor = IgnoreCompositor,
-            TransparentBackground = TransparentBackground
+            TransparentBackground = TransparentBackground, ViewportShading = ViewportShading
         };
     }
 }
@@ -696,6 +698,7 @@ public class CameraSetup : NotifyBase
     private string _frameStep = "1"; public string FrameStep { get => _frameStep; set => SetSetting(ref _frameStep, value); }
     public int DefaultStartFrame { get; set; } = 1; public int DefaultEndFrame { get; set; } = 250; public int? KeyframeStart { get; set; } public int? KeyframeEnd { get; set; }
     private string _renderMode = "FINAL"; public string RenderMode { get => _renderMode; set => SetSetting(ref _renderMode, value); }
+    public string ViewportShading { get; set; } = "SOLID";
     private string _engine = "KEEP"; public string Engine { get => _engine; set => SetSetting(ref _engine, value); }
     private string _outputPath = ""; public string OutputPath { get => _outputPath; set => SetSetting(ref _outputPath, value); }
     private string _width = "1920"; public string Width { get => _width; set => SetSetting(ref _width, value); }
@@ -722,10 +725,11 @@ public class CameraSetup : NotifyBase
     public string FrameRateSummary => $"{FrameRate} FPS";
     public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final Render";
     public string EngineSummary => Engine == "KEEP" ? "Saved setting" : Engine.Replace("BLENDER_", "");
+    public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
 
     public static CameraSetup FromRenderJob(RenderJob job) => new()
     {
-        CameraName = job.CameraName, ThumbnailPath = job.ThumbnailPath,
+        CameraName = job.CameraName, ThumbnailPath = job.ThumbnailPath, ViewportShading = job.ViewportShading,
         StartFrame = job.StartFrame, EndFrame = job.EndFrame, FrameStep = job.FrameStep,
         RenderMode = job.RenderMode, Engine = job.Engine, OutputPath = job.OutputPath,
         Width = job.Width, Height = job.Height, Scale = job.Scale, FrameRate = job.FrameRate, Format = job.Format,
@@ -736,7 +740,7 @@ public class CameraSetup : NotifyBase
     public void CopyAllSettingsFrom(CameraSetup source)
     {
         StartFrame = source.StartFrame; EndFrame = source.EndFrame; FrameStep = source.FrameStep;
-        RenderMode = source.RenderMode; Engine = source.Engine; OutputPath = source.OutputPath;
+        RenderMode = source.RenderMode; ViewportShading = source.ViewportShading; Engine = source.Engine; OutputPath = source.OutputPath;
         Width = source.Width; Height = source.Height; Scale = source.Scale; FrameRate = source.FrameRate; Format = source.Format;
         Overwrite = source.Overwrite; Placeholders = source.Placeholders; IgnoreCompositor = source.IgnoreCompositor; TransparentBackground = source.TransparentBackground;
     }
@@ -767,27 +771,31 @@ public class CameraSetup : NotifyBase
 public class RenderJob : NotifyBase
 {
     public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string FrameStep { get; init; } = "1"; public string OutputPath { get; init; } = "";
-    public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG";
+    public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG"; public string ViewportShading { get; init; } = "SOLID";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
     private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
-    private DateTime _startedAt; private int _lastReportedFrame = int.MinValue;
+    private DateTime _startedAt; private int _lastReportedFrame = int.MinValue; private int? _currentFrame;
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
-    public string? ThumbnailPath { get; init; }
-    public string SettingsSummary => $"{Width}×{Height} · {FrameRate} FPS · {Format}";
-    public string ProgressLabel => $"{Progress:0}%";
+    private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
+    public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
+    public string SettingsSummary => RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}";
+    public string ProgressLabel => _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
-    public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; Progress = 0; Estimate = "Estimating…"; Status = "Rendering"; }
-    public void ReportFrame(int frame)
+    public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; _currentFrame = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
+    public void ReportFrame(int frame, string? renderedPath)
     {
         if (frame <= _lastReportedFrame || !int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
         _lastReportedFrame = frame;
+        _currentFrame = frame;
         var step = int.TryParse(FrameStep, out var parsedStep) ? Math.Max(1, parsedStep) : 1;
         var total = Math.Max(1, (end - start) / step + 1);
         var completed = Math.Clamp((frame - start) / step + 1, 0, total);
         Progress = 100.0 * completed / total;
+        OnPropertyChanged(nameof(ProgressLabel));
+        if (!string.IsNullOrWhiteSpace(renderedPath) && (completed % 10 == 0 || frame >= end) && File.Exists(renderedPath)) ThumbnailPath = renderedPath;
         if (completed < 1) { Estimate = "Estimating…"; return; }
         var elapsed = DateTime.Now - _startedAt;
         var remaining = TimeSpan.FromTicks((long)(elapsed.Ticks / (double)completed * (total - completed)));
@@ -796,7 +804,7 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading };
     private static string ResolveTokens(string template, string cameraName, string blendFile) => template
         .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
         .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);

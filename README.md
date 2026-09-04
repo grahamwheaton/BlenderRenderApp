@@ -48,4 +48,6 @@ V3 adds a **Watch mode** control to the render queue:
 
 The partner add-on is in `BlenderAddon/render_queue_sender.py`. Install it in Blender, configure its NAS folder to match the folder selected beside Watch mode, and use **Render > Cloud Render** or **3D View > View > Cloud Playblast**.
 
+Cloud Playblast records the active 3D View shading mode (`Wireframe`, `Solid`, `Material Preview`, or `Rendered`) in the queued job. During rendering, queue progress shows the current frame and refreshes the queue thumbnail from a newly written output image every 10 frames and on the final frame.
+
 For cooperative rendering from multiple machines, enable **Placeholders** and disable **Overwrite** in Blender before sending the Cloud job. Every machine must be able to access the `.blend` and output paths, preferably through consistent UNC NAS paths.

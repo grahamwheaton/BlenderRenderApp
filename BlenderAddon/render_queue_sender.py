@@ -52,7 +52,7 @@ def camera_resolution(scene, camera):
     return int(width), int(height), int(scale)
 
 
-def build_job(context, render_mode):
+def build_job(context, render_mode, viewport_shading="SOLID"):
     scene = context.scene
     camera = scene.camera
     if camera is None or camera.type != "CAMERA":
@@ -85,6 +85,7 @@ def build_job(context, render_mode):
         "frameRate": scene.render.fps / scene.render.fps_base,
         "format": scene.render.image_settings.file_format,
         "renderMode": render_mode,
+        "viewportShading": viewport_shading,
         "overwrite": bool(scene.render.use_overwrite),
         "placeholders": bool(scene.render.use_placeholder),
         "ignoreCompositor": not bool(scene.render.use_compositing),
@@ -117,13 +118,13 @@ class RENDERQUEUE_Preferences(AddonPreferences):
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
-def write_cloud_job(context, render_mode):
+def write_cloud_job(context, render_mode, viewport_shading="SOLID"):
     folder_text = clean_path(prefs().shared_queue_folder)
     if not folder_text:
         raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
     folder = Path(folder_text)
     folder.mkdir(parents=True, exist_ok=True)
-    job = build_job(context, render_mode)
+    job = build_job(context, render_mode, viewport_shading)
     filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
     temporary = folder / ("." + filename + ".tmp")
     temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -153,7 +154,8 @@ class RENDERQUEUE_OT_cloud_playblast(Operator):
 
     def execute(self, context):
         try:
-            job = write_cloud_job(context, "PLAYBLAST")
+            shading = getattr(getattr(context.space_data, "shading", None), "type", "SOLID")
+            job = write_cloud_job(context, "PLAYBLAST", shading)
             self.report({"INFO"}, f"Sent {job['cameraName']} as a Cloud Playblast")
             return {"FINISHED"}
         except Exception as error:
