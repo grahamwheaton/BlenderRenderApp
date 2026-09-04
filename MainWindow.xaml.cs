@@ -347,6 +347,22 @@ public partial class MainWindow : Window
     }
 
     private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { _queue.Remove(job); UpdateQueueState(); } }
+    private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not RenderJob job) return;
+        var outputPath = job.OutputPath.Trim();
+        if (outputPath.StartsWith("//", StringComparison.Ordinal))
+            outputPath = Path.Combine(Path.GetDirectoryName(job.BlendFile) ?? "", outputPath[2..]);
+        outputPath = outputPath.Replace('/', Path.DirectorySeparatorChar);
+        var endsWithSeparator = outputPath.EndsWith(Path.DirectorySeparatorChar);
+        var folder = endsWithSeparator || Directory.Exists(outputPath) ? outputPath : Path.GetDirectoryName(outputPath);
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+        {
+            MessageBox.Show(this, "The output folder does not exist yet. It will be created when Blender starts rendering this job.", "Output folder", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
+    }
     private void ClearCompletedButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) _queue.Remove(job); UpdateQueueState(); }
     private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { if (_queueRunning) return; _queue.Clear(); UpdateQueueState(); StatusText.Text = "Render queue cleared"; }
     private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; QueueCountText.Text = $"{_queue.Count} job{(_queue.Count == 1 ? "" : "s")}"; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting") || _queueRunning; RenderQueueButton.Content = _queueRunning ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs"; }
