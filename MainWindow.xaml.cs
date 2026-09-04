@@ -26,6 +26,8 @@ public partial class MainWindow : Window
     private bool _queueRunning;
     private bool _cancelRequested;
     private bool _syncingCameraSettings;
+    private CameraSetup? _selectedCamera;
+    private CameraSetup? _copiedCameraSettings;
     private const string Marker = "BRH_JSON:";
     private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)", RegexOptions.Compiled);
 
@@ -70,6 +72,7 @@ public partial class MainWindow : Window
     private async void Window_Drop(object sender, DragEventArgs e) { if (TryGetBlendFile(e.Data, out var path)) await LoadBlendAsync(path); }
     private async void DropZone_Drop(object sender, DragEventArgs e) { ResetDropZone(); e.Handled = true; if (TryGetBlendFile(e.Data, out var path)) await LoadBlendAsync(path); }
     private void DropZone_Click(object sender, MouseButtonEventArgs e) => ChooseBlend();
+    private void ChooseBlendButton_Click(object sender, RoutedEventArgs e) => ChooseBlend();
 
     private async void ChooseBlend()
     {
@@ -142,10 +145,12 @@ public partial class MainWindow : Window
                     Overwrite = scene.use_overwrite, Placeholders = scene.use_placeholder, IgnoreCompositor = !scene.use_compositing
                 };
                 cameraSetup.SettingChanged = CameraSettingChanged;
+                cameraSetup.SelectionChanged = UpdateCameraSelectionCount;
                 _cameras.Add(cameraSetup);
             }
             ApplyFrameRangeMode();
-            CameraCountText.Text = $"{scene.cameras.Count} camera{(scene.cameras.Count == 1 ? "" : "s")} · active camera checked";
+            SetFocusedCamera(_cameras.FirstOrDefault(camera => camera.IsActive) ?? _cameras.FirstOrDefault());
+            UpdateCameraSelectionCount();
             AddQueueButton.IsEnabled = ContactSheetButton.IsEnabled = scene.cameras.Count > 0;
             StatusText.Text = scene.cameras.Count > 0 ? "Choose cameras and settings, then add them to the queue" : "No cameras found";
             SetLog(scene.cameras.Count > 0 ? $"Scene ready · {scene.render_engine} · {scene.resolution_x}×{scene.resolution_y} · {scene.file_format}" : "This file has no camera objects.");
@@ -210,8 +215,75 @@ public partial class MainWindow : Window
         foreach (var camera in _cameras) camera.IsChecked = isChecked;
     }
 
+    private void ClearSelection_Click(object sender, RoutedEventArgs e)
+    {
+        SelectAllCheckBox.IsChecked = false;
+        foreach (var camera in _cameras) camera.IsChecked = false;
+    }
+
+    private void CameraCard_Click(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is CameraSetup camera) SetFocusedCamera(camera);
+    }
+
+    private void SetFocusedCamera(CameraSetup? camera)
+    {
+        if (_selectedCamera == camera) return;
+        if (_selectedCamera is not null) _selectedCamera.IsFocused = false;
+        _selectedCamera = camera;
+        if (_selectedCamera is not null) _selectedCamera.IsFocused = true;
+        EditorHeader.DataContext = camera;
+        if (EditorHeader.Parent is Grid editorGrid) editorGrid.DataContext = camera;
+        UpdateRenderModeButtons();
+    }
+
+    private void UpdateCameraSelectionCount()
+    {
+        var selected = _cameras.Count(camera => camera.IsChecked);
+        CameraCountText.Text = $"{_cameras.Count} cameras · {selected} selected";
+    }
+
+    private void CopyCamera_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not CameraSetup camera) return;
+        _copiedCameraSettings = new CameraSetup();
+        _copiedCameraSettings.CopyAllSettingsFrom(camera);
+        SetFocusedCamera(camera);
+        StatusText.Text = $"Copied settings from {camera.CameraName}";
+        e.Handled = true;
+    }
+
+    private void PasteCamera_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not CameraSetup camera) return;
+        if (_copiedCameraSettings is null) { MessageBox.Show(this, "Copy camera settings first.", "Nothing copied", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        _syncingCameraSettings = true;
+        try { camera.CopyAllSettingsFrom(_copiedCameraSettings); }
+        finally { _syncingCameraSettings = false; }
+        SetFocusedCamera(camera);
+        StatusText.Text = $"Pasted settings to {camera.CameraName}";
+        e.Handled = true;
+    }
+
+    private void SetRenderMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCamera is not null && (sender as Button)?.Tag is string mode) { _selectedCamera.RenderMode = mode; UpdateRenderModeButtons(); }
+    }
+
+    private void UpdateRenderModeButtons()
+    {
+        var finalSelected = _selectedCamera?.RenderMode != "PLAYBLAST";
+        FinalRenderButton.Background = new SolidColorBrush(finalSelected ? Color.FromRgb(0x3A, 0x30, 0x2A) : Color.FromRgb(0x34, 0x3A, 0x44));
+        FinalRenderButton.BorderBrush = finalSelected ? (Brush)FindResource("Accent") : Brushes.Transparent;
+        FinalRenderButton.BorderThickness = finalSelected ? new Thickness(1) : new Thickness(0);
+        PlayblastButton.Background = new SolidColorBrush(!finalSelected ? Color.FromRgb(0x3A, 0x30, 0x2A) : Color.FromRgb(0x34, 0x3A, 0x44));
+        PlayblastButton.BorderBrush = !finalSelected ? (Brush)FindResource("Accent") : Brushes.Transparent;
+        PlayblastButton.BorderThickness = !finalSelected ? new Thickness(1) : new Thickness(0);
+    }
+
     private void CameraSettingChanged(CameraSetup source, string propertyName)
     {
+        if (source == _selectedCamera && propertyName == nameof(CameraSetup.RenderMode)) UpdateRenderModeButtons();
         if (_syncingCameraSettings || (Keyboard.Modifiers & ModifierKeys.Alt) == 0) return;
         _syncingCameraSettings = true;
         try
@@ -268,7 +340,7 @@ public partial class MainWindow : Window
 
     private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { _queue.Remove(job); UpdateQueueState(); } }
     private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) _queue.Remove(job); UpdateQueueState(); }
-    private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting") || _queueRunning; }
+    private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; QueueCountText.Text = $"{_queue.Count} job{(_queue.Count == 1 ? "" : "s")}"; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting") || _queueRunning; RenderQueueButton.Content = _queueRunning ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs"; }
 
     private async void RenderQueueButton_Click(object sender, RoutedEventArgs e)
     {
@@ -299,7 +371,7 @@ public partial class MainWindow : Window
     {
         DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = !running;
         foreach (var job in _queue) job.CanRemove = !running;
-        RenderQueueButton.Content = running ? "Cancel queue" : "Render queue";
+        RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs";
     }
 
     private static ProcessStartInfo MakeStartInfo(string exe, IEnumerable<string> args) { var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var arg in args) psi.ArgumentList.Add(arg); return psi; }
@@ -337,8 +409,11 @@ public partial class MainWindow : Window
 public class CameraSetup : NotifyBase
 {
     public Action<CameraSetup, string>? SettingChanged { get; set; }
+    public Action? SelectionChanged { get; set; }
     public string CameraName { get; set; } = "";
-    private bool _isChecked; public bool IsChecked { get => _isChecked; set => Set(ref _isChecked, value); }
+    private bool _isChecked; public bool IsChecked { get => _isChecked; set { if (Set(ref _isChecked, value)) SelectionChanged?.Invoke(); } }
+    private bool _isFocused; public bool IsFocused { get => _isFocused; set { if (Set(ref _isFocused, value)) OnPropertyChanged(nameof(FocusBorderBrush)); } }
+    public Brush FocusBorderBrush => IsFocused ? new SolidColorBrush(Color.FromRgb(0x3F, 0x9D, 0xE8)) : new SolidColorBrush(Color.FromRgb(0x35, 0x3E, 0x48));
     public bool IsActive { get; set; }
     public string? ThumbnailPath { get; set; }
     public bool UsesPerCameraResolution { get; set; }
@@ -362,7 +437,25 @@ public class CameraSetup : NotifyBase
 
     private void SetSetting<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
     {
-        if (Set(ref field, value, propertyName)) SettingChanged?.Invoke(this, propertyName);
+        if (!Set(ref field, value, propertyName)) return;
+        OnPropertyChanged(nameof(ResolutionSummary));
+        OnPropertyChanged(nameof(FrameRateSummary));
+        OnPropertyChanged(nameof(ModeSummary));
+        OnPropertyChanged(nameof(EngineSummary));
+        SettingChanged?.Invoke(this, propertyName);
+    }
+
+    public string ResolutionSummary => $"{Width}×{Height}";
+    public string FrameRateSummary => $"{FrameRate} FPS";
+    public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final Render";
+    public string EngineSummary => Engine == "KEEP" ? "Saved setting" : Engine.Replace("BLENDER_", "");
+
+    public void CopyAllSettingsFrom(CameraSetup source)
+    {
+        StartFrame = source.StartFrame; EndFrame = source.EndFrame; FrameStep = source.FrameStep;
+        RenderMode = source.RenderMode; Engine = source.Engine; OutputPath = source.OutputPath;
+        Width = source.Width; Height = source.Height; Scale = source.Scale; FrameRate = source.FrameRate; Format = source.Format;
+        Overwrite = source.Overwrite; Placeholders = source.Placeholders; IgnoreCompositor = source.IgnoreCompositor;
     }
 
     public void CopySettingFrom(CameraSetup source, string propertyName)
@@ -394,18 +487,22 @@ public class RenderJob : NotifyBase
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
-    private double _progress; public double Progress { get => _progress; private set => Set(ref _progress, value); }
+    private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
     private DateTime _startedAt; private int _lastReportedFrame = int.MinValue;
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
+    public string? ThumbnailPath { get; init; }
+    public string SettingsSummary => $"{Width}×{Height} · {FrameRate} FPS · {Format}";
+    public string ProgressLabel => $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
     public void Begin() { _startedAt = DateTime.Now; _lastReportedFrame = int.MinValue; Progress = 0; Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame)
     {
         if (frame <= _lastReportedFrame || !int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
         _lastReportedFrame = frame;
-        var total = Math.Max(1, end - start + 1);
-        var completed = Math.Clamp(frame - start + 1, 0, total);
+        var step = int.TryParse(FrameStep, out var parsedStep) ? Math.Max(1, parsedStep) : 1;
+        var total = Math.Max(1, (end - start) / step + 1);
+        var completed = Math.Clamp((frame - start) / step + 1, 0, total);
         Progress = 100.0 * completed / total;
         if (completed < 1) { Estimate = "Estimating…"; return; }
         var elapsed = DateTime.Now - _startedAt;
@@ -415,7 +512,7 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor };
     private static string ResolveTokens(string template, string cameraName, string blendFile) => template
         .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
         .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);

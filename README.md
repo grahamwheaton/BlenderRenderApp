@@ -34,3 +34,5 @@ dotnet publish -c Release
 ```
 
 The portable single-file app will be in `bin\Release\net8.0-windows\win-x64\publish`. Teammates can run that `.exe` directly without installing the .NET Desktop Runtime; Blender must still be installed.
+
+V2 uses a three-column workspace: queue selection and camera browsing on the left, focused-camera settings in the centre, and render jobs on the right. Camera checkboxes do not change which camera is being edited.

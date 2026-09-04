@@ -7,6 +7,8 @@
     <SolidColorBrush x:Key="Muted" Color="#9AA4B2"/>
     <SolidColorBrush x:Key="Accent" Color="#F57C23"/>
     <Style x:Key="FieldLabel" TargetType="TextBlock"><Setter Property="Foreground" Value="#9AA4B2"/><Setter Property="FontSize" Value="10"/><Setter Property="Margin" Value="0,0,0,5"/></Style>
+    <Style x:Key="SectionTitle" TargetType="TextBlock"><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="FontSize" Value="12"/><Setter Property="Margin" Value="0,0,0,12"/></Style>
+    <Style x:Key="EditorCard" TargetType="Border"><Setter Property="Background" Value="#1B2128"/><Setter Property="BorderBrush" Value="#343C46"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="6"/><Setter Property="Padding" Value="15"/></Style>
     <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#F3F5F7"/></Style>
     <Style TargetType="Button">
       <Setter Property="Padding" Value="16,9"/><Setter Property="BorderThickness" Value="0"/>
