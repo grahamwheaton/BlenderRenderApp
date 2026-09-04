@@ -6,9 +6,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Blender Render Launcher</AssemblyName>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
   <ItemGroup>
-    <None Include="Scripts\*.py" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Scripts\*.py" LogicalName="BlenderRenderHeadless.Scripts.%(Filename)%(Extension)" />
     <None Remove="Assets\blender-render-icon.png" />
     <Resource Include="Assets\blender-render-icon.png" />
   </ItemGroup>

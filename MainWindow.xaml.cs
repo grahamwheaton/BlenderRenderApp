@@ -115,7 +115,7 @@ public partial class MainWindow : Window
         StatusText.Text = "Reading cameras and generating previews…"; SetLog("Inspecting the Blender file and rendering camera thumbnails…");
         try
         {
-            var script = Path.Combine(AppContext.BaseDirectory, "Scripts", "inspect_scene.py");
+            var script = ExtractScript("inspect_scene.py");
             var thumbnailDirectory = Path.Combine(Path.GetTempPath(), "BlenderRenderLauncher", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(thumbnailDirectory);
             var result = await RunCaptureAsync(_blenderExe, ["--background", "--factory-startup", path, "--python", script, "--", thumbnailDirectory], TimeSpan.FromMinutes(3));
@@ -160,6 +160,23 @@ public partial class MainWindow : Window
         return Path.Combine(directory, Sanitize(camera)) + Path.DirectorySeparatorChar;
     }
     private static string Sanitize(string value) => string.Concat(value.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+
+    private static string ExtractScript(string fileName)
+    {
+        var assembly = typeof(MainWindow).Assembly;
+        var resourceName = $"BlenderRenderHeadless.Scripts.{fileName}";
+        using var source = assembly.GetManifestResourceStream(resourceName) ?? throw new InvalidOperationException($"Embedded Blender helper is missing: {fileName}");
+        var directory = Path.Combine(Path.GetTempPath(), "BlenderRenderLauncher", "Scripts", assembly.ManifestModule.ModuleVersionId.ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, fileName);
+        if (!File.Exists(path) || new FileInfo(path).Length != source.Length)
+        {
+            var temporaryPath = path + $".{Environment.ProcessId}.tmp";
+            using (var destination = File.Create(temporaryPath)) source.CopyTo(destination);
+            File.Move(temporaryPath, path, true);
+        }
+        return path;
+    }
 
     private void CameraOutputBrowse_Click(object sender, RoutedEventArgs e)
     {
@@ -265,7 +282,7 @@ public partial class MainWindow : Window
             AppendLog($"\n[{job.CameraName}] {job.ModeSummary} · {job.FrameSummary}");
             try
             {
-                var script = Path.Combine(AppContext.BaseDirectory, "Scripts", "render_scene.py");
+                var script = ExtractScript("render_scene.py");
                 var args = new[] { "--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0" };
                 var code = await RunStreamingAsync(_blenderExe, args, job);
                 job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";

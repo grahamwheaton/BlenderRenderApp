@@ -30,7 +30,7 @@ If Blender is not detected automatically, click **Set Blender…** and select `b
 ## Build
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained false
+dotnet publish -c Release
 ```
 
-The built app will be in `bin\Release\net8.0-windows\win-x64\publish` and requires the .NET 8 Desktop Runtime.
+The portable single-file app will be in `bin\Release\net8.0-windows\win-x64\publish`. Teammates can run that `.exe` directly without installing the .NET Desktop Runtime; Blender must still be installed.
