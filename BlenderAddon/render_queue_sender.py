@@ -13,6 +13,8 @@ import getpass
 import json
 import os
 import socket
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -114,6 +116,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.label(text="Blender Render Queue Sender - Version 5.0.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
@@ -147,9 +150,34 @@ def publish_cloud_job(job):
     os.replace(str(temporary), str(folder / filename))
 
 
+def copy_capture_frame(source, destination, overwrite):
+    destination_path = Path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if destination_path.is_file() and destination_path.stat().st_size > 0 and not overwrite:
+        return
+    last_error = None
+    for attempt in range(3):
+        temporary = destination_path.with_name(destination_path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            shutil.copyfile(source, temporary)
+            os.replace(str(temporary), str(destination_path))
+            if destination_path.stat().st_size == 0:
+                raise RuntimeError(f"Copied viewport frame is empty: {destination}")
+            return
+        except Exception as error:
+            last_error = error
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
+            if attempt < 2:
+                time.sleep(1 + attempt)
+    raise RuntimeError(f"Could not copy viewport frame to {destination}: {last_error}")
+
+
 class RENDERQUEUE_OT_cloud_render(Operator):
     bl_idname = "render.cloud_render"
-    bl_label = "Cloud Render"
+    bl_label = "Cloud Render (V5)"
     bl_description = "Send the active camera to every renderer watching the shared NAS queue"
 
     def execute(self, context):
@@ -164,7 +192,7 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
-    bl_label = "Cloud Playblast"
+    bl_label = "Cloud Playblast (V5)"
     bl_description = "Capture the active camera through this 3D View and publish the completed viewport playblast"
 
     def execute(self, context):
@@ -184,21 +212,40 @@ class RENDERQUEUE_OT_cloud_playblast(Operator):
                 raise RuntimeError("The active 3D View has no drawable window region.")
             previous_perspective = region_3d.view_perspective
             previous_frame = scene.frame_current
-            try:
-                # render.opengl with view_context=True is Blender's actual viewport
-                # renderer. Run it here because a background Blender process has no
-                # 3D View/window context to capture.
-                region_3d.view_perspective = "CAMERA"
-                with context.temp_override(area=context.area, region=window_region, space_data=context.space_data):
-                    result = bpy.ops.render.opengl(animation=True, view_context=True)
-                    if "FINISHED" not in result:
-                        raise RuntimeError("Blender cancelled the viewport capture.")
-            finally:
-                region_3d.view_perspective = previous_perspective
-                scene.frame_set(previous_frame)
+            previous_filepath = scene.render.filepath
+            previous_transparent = scene.render.film_transparent
+            frames = range(scene.frame_start, scene.frame_end + 1, max(1, scene.frame_step))
+            destination_paths = {}
+            for frame in frames:
+                destination_paths[frame] = bpy.path.abspath(scene.render.frame_path(frame=frame))
+
+            with tempfile.TemporaryDirectory(prefix="blender_render_viewport_") as capture_folder:
+                try:
+                    # render.opengl with view_context=True is Blender's actual viewport
+                    # renderer. Run it here because a background Blender process has no
+                    # 3D View/window context to capture. Capture locally first so a brief
+                    # NAS interruption cannot abort Blender's viewport operation.
+                    scene.render.filepath = str(Path(capture_folder) / "frame_")
+                    scene.render.film_transparent = False
+                    region_3d.view_perspective = "CAMERA"
+                    with context.temp_override(area=context.area, region=window_region, space_data=context.space_data):
+                        result = bpy.ops.render.opengl(animation=True, view_context=True)
+                        if "FINISHED" not in result:
+                            raise RuntimeError("Blender cancelled the viewport capture.")
+
+                    for frame, destination in destination_paths.items():
+                        staged_frame = bpy.path.abspath(scene.render.frame_path(frame=frame))
+                        if not Path(staged_frame).is_file() or Path(staged_frame).stat().st_size == 0:
+                            raise RuntimeError(f"Viewport capture did not create frame {frame}.")
+                        copy_capture_frame(staged_frame, destination, job["overwrite"])
+                finally:
+                    scene.render.filepath = previous_filepath
+                    scene.render.film_transparent = previous_transparent
+                    region_3d.view_perspective = previous_perspective
+                    scene.frame_set(previous_frame)
 
             last_frame = scene.frame_start + ((scene.frame_end - scene.frame_start) // max(1, scene.frame_step)) * max(1, scene.frame_step)
-            preview_path = bpy.path.abspath(scene.render.frame_path(frame=last_frame))
+            preview_path = destination_paths[last_frame]
             if not Path(preview_path).is_file() or Path(preview_path).stat().st_size == 0:
                 raise RuntimeError("Viewport capture finished but the final output frame could not be found.")
             job.update({

@@ -59,6 +59,7 @@ public partial class MainWindow : Window
         if (cloudFolderIndex >= 0 && cloudFolderIndex + 1 < startupArguments.Length) _cloudQueueFolder = startupArguments[cloudFolderIndex + 1];
         _suppressWatchChange = true;
         AutoStartCheckBox.IsChecked = savedSettings.AutoStart;
+        OnlyMyPcCheckBox.IsChecked = savedSettings.OnlyMyPc;
         _suppressWatchChange = false;
         _watchTimer.Tick += WatchTimer_Tick;
         Loaded += (_, _) =>
@@ -173,6 +174,11 @@ public partial class MainWindow : Window
         catch (JsonException ex) { AppendLog($"Rejected {source} job: {ex.Message}"); return false; }
         if (incoming is null || string.IsNullOrWhiteSpace(incoming.JobId)) return false;
         if (_receivedJobIds.Contains(incoming.JobId)) return true;
+        if (OnlyMyPcCheckBox.IsChecked == true && !incoming.SenderMachine.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+        {
+            AppendLog($"Ignored {source} job from {incoming.SenderUser}@{incoming.SenderMachine} · ONLY MY PC is enabled");
+            return false;
+        }
         var coordinationFolder = cloudJobFile is null ? null : Path.GetDirectoryName(cloudJobFile);
         if (incoming.Distributed && !string.IsNullOrWhiteSpace(coordinationFolder) && File.Exists(Path.Combine(coordinationFolder, "_claims", SafeJobId(incoming.JobId), "complete.json")))
         {
@@ -199,7 +205,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         _cloudQueueFolder = dialog.FolderName;
         Directory.CreateDirectory(_cloudQueueFolder);
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true));
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true));
         _seenCloudFiles.Clear();
         foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json"))
             if (!IsDistributedJobFile(file)) _seenCloudFiles.Add(file);
@@ -226,9 +232,16 @@ public partial class MainWindow : Window
     private void AutoStart_Changed(object sender, RoutedEventArgs e)
     {
         if (_suppressWatchChange) return;
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true));
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true));
         if (AutoStartCheckBox.IsChecked == true && WatchModeCheckBox.IsChecked == true && _queue.Any(job => job.Status == "Waiting")) ResetAutoStartCountdown();
         else { _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed; }
+    }
+
+    private void OnlyMyPc_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWatchChange) return;
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true));
+        StatusText.Text = OnlyMyPcCheckBox.IsChecked == true ? $"Watching jobs from {Environment.MachineName} only" : "Watching jobs from all computers";
     }
 
     private void ResetAutoStartCountdown()
@@ -241,8 +254,8 @@ public partial class MainWindow : Window
     private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BlenderRenderLauncher", "settings.json");
     private static AppSettings LoadAppSettings()
     {
-        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(DefaultCloudQueueFolder, false) : new(DefaultCloudQueueFolder, false); }
-        catch { return new(DefaultCloudQueueFolder, false); }
+        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(DefaultCloudQueueFolder, false, false) : new(DefaultCloudQueueFolder, false, false); }
+        catch { return new(DefaultCloudQueueFolder, false, false); }
     }
     private static void SaveAppSettings(AppSettings settings)
     {
@@ -674,7 +687,7 @@ public partial class MainWindow : Window
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
-    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart);
+    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false);
 
     private sealed class IncomingRenderJob
     {

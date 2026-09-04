@@ -60,6 +60,8 @@ Watch Mode also scans existing V4 jobs when it starts. A machine can therefore j
 
 ## V5 true viewport playblast
 
-V5 Cloud Playblast uses Blender's real viewport renderer in the open sending Blender session. It captures the active camera with the current 3D View shading, overlays, lighting and viewport settings by calling Blender's `render.opengl` viewport operation. The completed image sequence is then published to the NAS queue and appears as a completed, reviewable job in every app already in Watch Mode. It is not rendered again by the headless workers.
+V5 Cloud Playblast uses Blender's real viewport renderer in the open sending Blender session. It captures the active camera with the current 3D View shading, overlays, lighting and viewport settings by calling Blender's `render.opengl` viewport operation. Frames are staged on the sending computer first and then copied safely to the chosen output, preventing a brief NAS write interruption from aborting the viewport capture. The completed image sequence is then published to the NAS queue and appears as a completed, reviewable job in every app already in Watch Mode. It is not rendered again by the headless workers.
 
 Run it from **3D View > View > Cloud Playblast**. V5 currently requires an image sequence format such as JPEG or PNG; FFmpeg is deliberately rejected so the app can verify and preview the output. Cloud Render remains the distributed V4 headless render workflow.
+
+Enable **ONLY MY PC** beside Watch to ignore jobs sent from other computers. The app and Blender menu/preferences display their V5 version so installations can be checked at a glance.
