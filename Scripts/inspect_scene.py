@@ -16,6 +16,7 @@ saved_frame_rate = scene.render.fps / scene.render.fps_base
 saved_use_overwrite = scene.render.use_overwrite
 saved_use_placeholder = scene.render.use_placeholder
 saved_use_compositing = scene.render.use_compositing
+saved_film_transparent = scene.render.film_transparent
 
 # Register only Per-Camera Resolution inside the otherwise isolated Blender
 # session. Its saved PropertyGroup values are exposed through RNA only after
@@ -159,6 +160,7 @@ data = {
     "use_overwrite": saved_use_overwrite,
     "use_placeholder": saved_use_placeholder,
     "use_compositing": saved_use_compositing,
+    "film_transparent": saved_film_transparent,
     "thumbnails": thumbnails,
     "camera_settings": camera_settings,
     "camera_keyframes": camera_keyframes,

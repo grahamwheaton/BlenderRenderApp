@@ -41,6 +41,7 @@
         <Border Height="1" Background="#343C46" Margin="0,24,0,20"/>
         <TextBlock Text="RENDER ENGINE" Style="{StaticResource SectionTitle}"/>
         <ComboBox SelectedValue="{Binding Engine}" SelectedValuePath="Tag" Height="36"><ComboBoxItem Tag="KEEP" Content="Saved setting"/><ComboBoxItem Tag="BLENDER_EEVEE" Content="EEVEE"/><ComboBoxItem Tag="CYCLES" Content="Cycles"/><ComboBoxItem Tag="BLENDER_WORKBENCH" Content="Workbench"/></ComboBox>
+        <CheckBox Content="Transparent background" IsChecked="{Binding TransparentBackground}" Margin="0,14,0,0"/>
        </StackPanel>
        <Border Grid.Column="1" Background="#343C46"/>
        <StackPanel Grid.Column="2" Margin="20,0,0,0">
