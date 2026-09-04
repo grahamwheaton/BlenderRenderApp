@@ -13,7 +13,6 @@ import getpass
 import json
 import os
 import socket
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -103,7 +102,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
         name="Shared NAS Queue Folder",
         description="Folder watched by Blender Render apps on the NAS",
         subtype="DIR_PATH",
-        default="",
+        default=r"W:\Working Graphics\_3D RESOURCE\CloudRender",
     )
     save_before_sending: BoolProperty(
         name="Save Before Sending",
@@ -126,7 +125,7 @@ def write_cloud_job(context, render_mode):
     folder.mkdir(parents=True, exist_ok=True)
     job = build_job(context, render_mode)
     filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
-    temporary = Path(tempfile.gettempdir()) / (filename + ".tmp")
+    temporary = folder / ("." + filename + ".tmp")
     temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(str(temporary), str(folder / filename))
     return job

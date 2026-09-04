@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private const string Marker = "BRH_JSON:";
     private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)", RegexOptions.Compiled);
     private const int LocalWatchPort = 43129;
+    private const string DefaultCloudQueueFolder = @"W:\Working Graphics\_3D RESOURCE\CloudRender";
     private readonly DispatcherTimer _watchTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly HashSet<string> _receivedJobIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _seenCloudFiles = new(StringComparer.OrdinalIgnoreCase);
@@ -52,7 +53,7 @@ public partial class MainWindow : Window
         QueueItems.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(QueueItems_Click));
         _blenderExe = FindBlender();
         var savedSettings = LoadAppSettings();
-        _cloudQueueFolder = savedSettings.CloudQueueFolder;
+        _cloudQueueFolder = string.IsNullOrWhiteSpace(savedSettings.CloudQueueFolder) ? DefaultCloudQueueFolder : savedSettings.CloudQueueFolder;
         var startupArguments = Environment.GetCommandLineArgs();
         var cloudFolderIndex = Array.FindIndex(startupArguments, argument => argument.Equals("--cloud-folder", StringComparison.OrdinalIgnoreCase));
         if (cloudFolderIndex >= 0 && cloudFolderIndex + 1 < startupArguments.Length) _cloudQueueFolder = startupArguments[cloudFolderIndex + 1];
@@ -212,8 +213,8 @@ public partial class MainWindow : Window
     private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BlenderRenderLauncher", "settings.json");
     private static AppSettings LoadAppSettings()
     {
-        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(null, false) : new(null, false); }
-        catch { return new(null, false); }
+        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(DefaultCloudQueueFolder, false) : new(DefaultCloudQueueFolder, false); }
+        catch { return new(DefaultCloudQueueFolder, false); }
     }
     private static void SaveAppSettings(AppSettings settings)
     {
