@@ -339,7 +339,8 @@ public partial class MainWindow : Window
     }
 
     private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { _queue.Remove(job); UpdateQueueState(); } }
-    private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) _queue.Remove(job); UpdateQueueState(); }
+    private void ClearCompletedButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) _queue.Remove(job); UpdateQueueState(); }
+    private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { if (_queueRunning) return; _queue.Clear(); UpdateQueueState(); StatusText.Text = "Render queue cleared"; }
     private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; QueueCountText.Text = $"{_queue.Count} job{(_queue.Count == 1 ? "" : "s")}"; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting") || _queueRunning; RenderQueueButton.Content = _queueRunning ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs"; }
 
     private async void RenderQueueButton_Click(object sender, RoutedEventArgs e)
@@ -369,7 +370,7 @@ public partial class MainWindow : Window
 
     private void SetUiRunning(bool running)
     {
-        DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = !running;
+        DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = ClearQueueButton.IsEnabled = ClearCompletedButton.IsEnabled = !running;
         foreach (var job in _queue) job.CanRemove = !running;
         RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs";
     }
