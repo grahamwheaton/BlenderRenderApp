@@ -41,11 +41,11 @@ V2 uses a three-column workspace: queue selection and camera browsing on the lef
 
 V3 adds a **Watch mode** control to the render queue:
 
-- Local jobs arrive only from Blender on the same computer through loopback port `43129`.
 - Cloud jobs are JSON job files written to a shared NAS folder. Every app that was already watching that folder receives each new job once.
-- Each incoming job resets a visible 10-second countdown. When the countdown ends, all waiting jobs render automatically.
+- **Auto start** is independent from Watch mode. When enabled, each incoming job resets a visible 10-second countdown and all waiting jobs render when it ends.
 - Existing NAS job files are ignored when Watch mode starts, preventing old work from unexpectedly rendering.
+- Start the app with `--watch --auto-start` to enable both options automatically, for example from a Windows startup shortcut.
 
-The partner add-on is in `BlenderAddon/render_queue_sender.py`. Install it in Blender, configure its NAS folder to match the folder selected beside Watch mode, and use **Render > Send to Render Queue Local** or **Render > Send to Render Queue Cloud**.
+The partner add-on is in `BlenderAddon/render_queue_sender.py`. Install it in Blender, configure its NAS folder to match the folder selected beside Watch mode, and use **Render > Cloud Render** or **3D View > View > Cloud Playblast**.
 
 For cooperative rendering from multiple machines, enable **Placeholders** and disable **Overwrite** in Blender before sending the Cloud job. Every machine must be able to access the `.blend` and output paths, preferably through consistent UNC NAS paths.

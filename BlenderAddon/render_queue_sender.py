@@ -17,12 +17,8 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from bpy.props import BoolProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, StringProperty
 from bpy.types import AddonPreferences, Operator
-
-LOCAL_HOST = "127.0.0.1"
-DEFAULT_LOCAL_PORT = 43129
-
 
 def prefs():
     return bpy.context.preferences.addons[__name__].preferences
@@ -57,7 +53,7 @@ def camera_resolution(scene, camera):
     return int(width), int(height), int(scale)
 
 
-def build_job(context):
+def build_job(context, render_mode):
     scene = context.scene
     camera = scene.camera
     if camera is None or camera.type != "CAMERA":
@@ -89,7 +85,7 @@ def build_job(context):
         "scale": scale,
         "frameRate": scene.render.fps / scene.render.fps_base,
         "format": scene.render.image_settings.file_format,
-        "renderMode": "FINAL",
+        "renderMode": render_mode,
         "overwrite": bool(scene.render.use_overwrite),
         "placeholders": bool(scene.render.use_placeholder),
         "ignoreCompositor": not bool(scene.render.use_compositing),
@@ -109,13 +105,6 @@ class RENDERQUEUE_Preferences(AddonPreferences):
         subtype="DIR_PATH",
         default="",
     )
-    local_port: IntProperty(
-        name="Local Watch Port",
-        description="Must match the Blender Render desktop app",
-        default=DEFAULT_LOCAL_PORT,
-        min=1024,
-        max=65535,
-    )
     save_before_sending: BoolProperty(
         name="Save Before Sending",
         description="Save the current .blend so the renderer receives the latest changes",
@@ -125,54 +114,48 @@ class RENDERQUEUE_Preferences(AddonPreferences):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "shared_queue_folder")
-        layout.prop(self, "local_port")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
-class RENDERQUEUE_OT_send_local(Operator):
-    bl_idname = "render.send_to_queue_local"
-    bl_label = "Send to Render Queue Local"
-    bl_description = "Send the active camera to Watch mode on this computer"
+def write_cloud_job(context, render_mode):
+    folder_text = clean_path(prefs().shared_queue_folder)
+    if not folder_text:
+        raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
+    folder = Path(folder_text)
+    folder.mkdir(parents=True, exist_ok=True)
+    job = build_job(context, render_mode)
+    filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
+    temporary = Path(tempfile.gettempdir()) / (filename + ".tmp")
+    temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(temporary), str(folder / filename))
+    return job
+
+
+class RENDERQUEUE_OT_cloud_render(Operator):
+    bl_idname = "render.cloud_render"
+    bl_label = "Cloud Render"
+    bl_description = "Send the active camera to every renderer watching the shared NAS queue"
 
     def execute(self, context):
         try:
-            job = build_job(context)
-            payload = json.dumps(job, ensure_ascii=False).encode("utf-8")
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-                client.settimeout(2.0)
-                client.sendto(payload, (LOCAL_HOST, prefs().local_port))
-                acknowledgement, _address = client.recvfrom(128)
-                if acknowledgement != b"BRQ_ACK":
-                    raise RuntimeError("The local render app returned an invalid response.")
-            self.report({"INFO"}, f"Sent {job['cameraName']} to the local render queue")
+            job = write_cloud_job(context, "FINAL")
+            self.report({"INFO"}, f"Sent {job['cameraName']} as a Cloud Render")
             return {"FINISHED"}
-        except socket.timeout:
-            self.report({"ERROR"}, "No local Blender Render app responded. Open V3 and enable Watch mode.")
-            return {"CANCELLED"}
         except Exception as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
 
 
-class RENDERQUEUE_OT_send_cloud(Operator):
-    bl_idname = "render.send_to_queue_cloud"
-    bl_label = "Send to Render Queue Cloud"
-    bl_description = "Send the active camera to every renderer watching the shared NAS queue"
+class RENDERQUEUE_OT_cloud_playblast(Operator):
+    bl_idname = "view3d.cloud_playblast"
+    bl_label = "Cloud Playblast"
+    bl_description = "Send an active-camera Workbench playblast to every renderer watching the shared NAS queue"
 
     def execute(self, context):
         try:
-            folder_text = clean_path(prefs().shared_queue_folder)
-            if not folder_text:
-                raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
-            folder = Path(folder_text)
-            folder.mkdir(parents=True, exist_ok=True)
-            job = build_job(context)
-            filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
-            temporary = Path(tempfile.gettempdir()) / (filename + ".tmp")
-            temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
-            os.replace(str(temporary), str(folder / filename))
-            self.report({"INFO"}, f"Sent {job['cameraName']} to the NAS render queue")
+            job = write_cloud_job(context, "PLAYBLAST")
+            self.report({"INFO"}, f"Sent {job['cameraName']} as a Cloud Playblast")
             return {"FINISHED"}
         except Exception as error:
             self.report({"ERROR"}, str(error))
@@ -181,14 +164,18 @@ class RENDERQUEUE_OT_send_cloud(Operator):
 
 def draw_render_menu(self, context):
     self.layout.separator()
-    self.layout.operator(RENDERQUEUE_OT_send_local.bl_idname, icon="RENDER_ANIMATION")
-    self.layout.operator(RENDERQUEUE_OT_send_cloud.bl_idname, icon="NETWORK_DRIVE")
+    self.layout.operator(RENDERQUEUE_OT_cloud_render.bl_idname, icon="NETWORK_DRIVE")
+
+
+def draw_view_menu(self, context):
+    self.layout.separator()
+    self.layout.operator(RENDERQUEUE_OT_cloud_playblast.bl_idname, icon="RENDER_ANIMATION")
 
 
 classes = (
     RENDERQUEUE_Preferences,
-    RENDERQUEUE_OT_send_local,
-    RENDERQUEUE_OT_send_cloud,
+    RENDERQUEUE_OT_cloud_render,
+    RENDERQUEUE_OT_cloud_playblast,
 )
 
 
@@ -196,9 +183,11 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_render.append(draw_render_menu)
+    bpy.types.VIEW3D_MT_view.append(draw_view_menu)
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_view.remove(draw_view_menu)
     bpy.types.TOPBAR_MT_render.remove(draw_render_menu)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

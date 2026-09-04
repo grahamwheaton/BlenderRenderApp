@@ -49,10 +49,23 @@ public partial class MainWindow : Window
         InitializeComponent();
         CameraItems.ItemsSource = _cameras;
         QueueItems.ItemsSource = _queue;
+        QueueItems.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(QueueItems_Click));
         _blenderExe = FindBlender();
-        _cloudQueueFolder = LoadAppSettings().CloudQueueFolder;
+        var savedSettings = LoadAppSettings();
+        _cloudQueueFolder = savedSettings.CloudQueueFolder;
+        var startupArguments = Environment.GetCommandLineArgs();
+        var cloudFolderIndex = Array.FindIndex(startupArguments, argument => argument.Equals("--cloud-folder", StringComparison.OrdinalIgnoreCase));
+        if (cloudFolderIndex >= 0 && cloudFolderIndex + 1 < startupArguments.Length) _cloudQueueFolder = startupArguments[cloudFolderIndex + 1];
+        _suppressWatchChange = true;
+        AutoStartCheckBox.IsChecked = savedSettings.AutoStart;
+        _suppressWatchChange = false;
         _watchTimer.Tick += WatchTimer_Tick;
-        Loaded += (_, _) => { if (Environment.GetCommandLineArgs().Any(argument => argument.Equals("--watch", StringComparison.OrdinalIgnoreCase))) WatchModeCheckBox.IsChecked = true; };
+        Loaded += (_, _) =>
+        {
+            var arguments = Environment.GetCommandLineArgs();
+            if (arguments.Any(argument => argument.Equals("--auto-start", StringComparison.OrdinalIgnoreCase))) AutoStartCheckBox.IsChecked = true;
+            if (arguments.Any(argument => argument.Equals("--watch", StringComparison.OrdinalIgnoreCase))) WatchModeCheckBox.IsChecked = true;
+        };
         Closed += (_, _) => StopWatchMode();
         StatusText.Text = _blenderExe is null ? "Set the location of blender.exe" : $"Ready · {Path.GetFileName(Path.GetDirectoryName(_blenderExe))}";
     }
@@ -124,7 +137,7 @@ public partial class MainWindow : Window
     private void WatchTimer_Tick(object? sender, EventArgs e)
     {
         PollCloudJobs();
-        if (_queueRunning || _autoStartAt is null) return;
+        if (AutoStartCheckBox.IsChecked != true || _queueRunning || _autoStartAt is null) return;
         var remaining = Math.Max(0, (int)Math.Ceiling((_autoStartAt.Value - DateTime.Now).TotalSeconds));
         WatchCountdownText.Text = $"Auto-render starts in {remaining}s";
         WatchCountdownText.Visibility = Visibility.Visible;
@@ -163,8 +176,7 @@ public partial class MainWindow : Window
         _receivedJobIds.Add(incoming.JobId);
         var job = incoming.ToRenderJob();
         _queue.Add(job); UpdateQueueState();
-        _autoStartAt = DateTime.Now.AddSeconds(10);
-        WatchCountdownText.Visibility = Visibility.Visible;
+        ResetAutoStartCountdown();
         StatusText.Text = $"{source} job received · {job.CameraName}";
         AppendLog($"{source} Watch job received from {incoming.SenderUser}@{incoming.SenderMachine}: {job.BlendFile} · {job.CameraName}");
         return true;
@@ -176,17 +188,32 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         _cloudQueueFolder = dialog.FolderName;
         Directory.CreateDirectory(_cloudQueueFolder);
-        SaveAppSettings(new AppSettings(_cloudQueueFolder));
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true));
         _seenCloudFiles.Clear();
         foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json")) _seenCloudFiles.Add(file);
         StatusText.Text = $"NAS queue folder · {_cloudQueueFolder}";
     }
 
+    private void AutoStart_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWatchChange) return;
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true));
+        if (AutoStartCheckBox.IsChecked == true && WatchModeCheckBox.IsChecked == true && _queue.Any(job => job.Status == "Waiting")) ResetAutoStartCountdown();
+        else { _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed; }
+    }
+
+    private void ResetAutoStartCountdown()
+    {
+        if (AutoStartCheckBox.IsChecked != true || WatchModeCheckBox.IsChecked != true) return;
+        _autoStartAt = DateTime.Now.AddSeconds(10);
+        WatchCountdownText.Visibility = Visibility.Visible;
+    }
+
     private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BlenderRenderLauncher", "settings.json");
     private static AppSettings LoadAppSettings()
     {
-        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(null) : new(null); }
-        catch { return new(null); }
+        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(null, false) : new(null, false); }
+        catch { return new(null, false); }
     }
     private static void SaveAppSettings(AppSettings settings)
     {
@@ -385,7 +412,32 @@ public partial class MainWindow : Window
 
     private void CameraCard_Click(object sender, MouseButtonEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is CameraSetup camera) SetFocusedCamera(camera);
+        if ((sender as FrameworkElement)?.Tag is CameraSetup camera)
+        {
+            CameraSettingsContent.IsHitTestVisible = true;
+            QueueReviewBadge.Visibility = Visibility.Collapsed;
+            SetFocusedCamera(camera);
+            e.Handled = true;
+        }
+    }
+
+    private void QueueItems_Click(object sender, MouseButtonEventArgs e)
+    {
+        DependencyObject? current = e.OriginalSource as DependencyObject;
+        while (current is not null)
+        {
+            if (current is Button) return;
+            if (current is FrameworkElement element && element.DataContext is RenderJob job)
+            {
+                CameraSettingsContent.IsHitTestVisible = false;
+                QueueReviewBadge.Visibility = Visibility.Visible;
+                SetFocusedCamera(CameraSetup.FromRenderJob(job));
+                StatusText.Text = $"Reviewing queued settings · {job.CameraName}";
+                e.Handled = true;
+                return;
+            }
+            current = current is FrameworkContentElement content ? content.Parent : VisualTreeHelper.GetParent(current);
+        }
     }
 
     private void SetFocusedCamera(CameraSetup? camera)
@@ -500,9 +552,10 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { _queue.Remove(job); UpdateQueueState(); } }
+    private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { _queue.Remove(job); UpdateQueueState(); } e.Handled = true; }
     private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)
     {
+        e.Handled = true;
         if ((sender as Button)?.Tag is not RenderJob job) return;
         var outputPath = job.OutputPath.Trim();
         if (outputPath.StartsWith("//", StringComparison.Ordinal))
@@ -545,8 +598,8 @@ public partial class MainWindow : Window
         _queueRunning = false; _renderProcess = null; SetUiRunning(false); UpdateQueueState();
         StatusText.Text = _cancelRequested ? "Queue cancelled" : _queue.Any(j => j.Status == "Failed") ? "Queue finished with errors" : "Queue finished";
         AppendLog(_cancelRequested ? "\nQueue cancelled." : "\nQueue complete.");
-        if (!_cancelRequested && WatchModeCheckBox.IsChecked == true && _queue.Any(j => j.Status == "Waiting"))
-            _autoStartAt = DateTime.Now.AddSeconds(10);
+        if (!_cancelRequested && WatchModeCheckBox.IsChecked == true && AutoStartCheckBox.IsChecked == true && _queue.Any(j => j.Status == "Waiting"))
+            ResetAutoStartCountdown();
     }
 
     private void SetUiRunning(bool running)
@@ -586,7 +639,7 @@ public partial class MainWindow : Window
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
-    private sealed record AppSettings(string? CloudQueueFolder);
+    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart);
 
     private sealed class IncomingRenderJob
     {
@@ -668,6 +721,16 @@ public class CameraSetup : NotifyBase
     public string FrameRateSummary => $"{FrameRate} FPS";
     public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final Render";
     public string EngineSummary => Engine == "KEEP" ? "Saved setting" : Engine.Replace("BLENDER_", "");
+
+    public static CameraSetup FromRenderJob(RenderJob job) => new()
+    {
+        CameraName = job.CameraName, ThumbnailPath = job.ThumbnailPath,
+        StartFrame = job.StartFrame, EndFrame = job.EndFrame, FrameStep = job.FrameStep,
+        RenderMode = job.RenderMode, Engine = job.Engine, OutputPath = job.OutputPath,
+        Width = job.Width, Height = job.Height, Scale = job.Scale, FrameRate = job.FrameRate, Format = job.Format,
+        Overwrite = job.Overwrite, Placeholders = job.Placeholders, IgnoreCompositor = job.IgnoreCompositor,
+        TransparentBackground = job.TransparentBackground
+    };
 
     public void CopyAllSettingsFrom(CameraSetup source)
     {
