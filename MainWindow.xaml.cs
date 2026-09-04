@@ -4,6 +4,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +15,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace BlenderRenderHeadless;
 
@@ -30,6 +33,16 @@ public partial class MainWindow : Window
     private CameraSetup? _copiedCameraSettings;
     private const string Marker = "BRH_JSON:";
     private static readonly Regex FramePattern = new(@"BRH_FRAME_DONE:(\d+)", RegexOptions.Compiled);
+    private const int LocalWatchPort = 43129;
+    private readonly DispatcherTimer _watchTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly HashSet<string> _receivedJobIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _seenCloudFiles = new(StringComparer.OrdinalIgnoreCase);
+    private UdpClient? _localListener;
+    private CancellationTokenSource? _watchCancellation;
+    private DateTime? _autoStartAt;
+    private string? _cloudQueueFolder;
+    private bool _suppressWatchChange;
+    private static readonly JsonSerializerOptions JobJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public MainWindow()
     {
@@ -37,7 +50,148 @@ public partial class MainWindow : Window
         CameraItems.ItemsSource = _cameras;
         QueueItems.ItemsSource = _queue;
         _blenderExe = FindBlender();
+        _cloudQueueFolder = LoadAppSettings().CloudQueueFolder;
+        _watchTimer.Tick += WatchTimer_Tick;
+        Loaded += (_, _) => { if (Environment.GetCommandLineArgs().Any(argument => argument.Equals("--watch", StringComparison.OrdinalIgnoreCase))) WatchModeCheckBox.IsChecked = true; };
+        Closed += (_, _) => StopWatchMode();
         StatusText.Text = _blenderExe is null ? "Set the location of blender.exe" : $"Ready · {Path.GetFileName(Path.GetDirectoryName(_blenderExe))}";
+    }
+
+    private async void WatchMode_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWatchChange) return;
+        if (WatchModeCheckBox.IsChecked == true) await StartWatchModeAsync();
+        else StopWatchMode();
+    }
+
+    private async Task StartWatchModeAsync()
+    {
+        StopWatchMode();
+        try
+        {
+            if (_blenderExe is null) throw new InvalidOperationException("Choose blender.exe before enabling Watch mode.");
+            _watchCancellation = new CancellationTokenSource();
+            _localListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, LocalWatchPort));
+            _seenCloudFiles.Clear();
+            if (!string.IsNullOrWhiteSpace(_cloudQueueFolder) && Directory.Exists(_cloudQueueFolder))
+                foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json")) _seenCloudFiles.Add(file);
+            _watchTimer.Start();
+            _ = ReceiveLocalJobsAsync(_watchCancellation.Token);
+            StatusText.Text = string.IsNullOrWhiteSpace(_cloudQueueFolder)
+                ? $"Watch mode · local machine on port {LocalWatchPort} · choose a NAS folder for Cloud"
+                : $"Watch mode · local machine and NAS queue";
+            await Task.CompletedTask;
+        }
+        catch (Exception ex)
+        {
+            StopWatchMode();
+            _suppressWatchChange = true; WatchModeCheckBox.IsChecked = false; _suppressWatchChange = false;
+            MessageBox.Show(this, ex.Message, "Could not start Watch mode", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void StopWatchMode()
+    {
+        _watchTimer.Stop();
+        _watchCancellation?.Cancel();
+        _localListener?.Dispose();
+        _watchCancellation?.Dispose();
+        _watchCancellation = null; _localListener = null; _autoStartAt = null;
+        if (WatchCountdownText is not null) WatchCountdownText.Visibility = Visibility.Collapsed;
+    }
+
+    private async Task ReceiveLocalJobsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && _localListener is not null)
+            {
+                var packet = await _localListener.ReceiveAsync(cancellationToken);
+                var json = Encoding.UTF8.GetString(packet.Buffer);
+                var accepted = await Dispatcher.InvokeAsync(() => QueueIncomingJob(json, "Local"));
+                if (accepted && _localListener is not null)
+                {
+                    var acknowledgement = Encoding.UTF8.GetBytes("BRQ_ACK");
+                    await _localListener.SendAsync(acknowledgement, packet.RemoteEndPoint, cancellationToken);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (Exception ex) { await Dispatcher.InvokeAsync(() => AppendLog($"Watch mode local error: {ex.Message}")); }
+    }
+
+    private void WatchTimer_Tick(object? sender, EventArgs e)
+    {
+        PollCloudJobs();
+        if (_queueRunning || _autoStartAt is null) return;
+        var remaining = Math.Max(0, (int)Math.Ceiling((_autoStartAt.Value - DateTime.Now).TotalSeconds));
+        WatchCountdownText.Text = $"Auto-render starts in {remaining}s";
+        WatchCountdownText.Visibility = Visibility.Visible;
+        if (remaining > 0) return;
+        _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed;
+        RenderQueueButton_Click(RenderQueueButton, new RoutedEventArgs());
+    }
+
+    private void PollCloudJobs()
+    {
+        if (string.IsNullOrWhiteSpace(_cloudQueueFolder) || !Directory.Exists(_cloudQueueFolder)) return;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").OrderBy(File.GetCreationTimeUtc))
+            {
+                if (!_seenCloudFiles.Add(file)) continue;
+                try { QueueIncomingJob(File.ReadAllText(file, Encoding.UTF8), "Cloud"); }
+                catch (Exception ex) { AppendLog($"Could not read NAS job {Path.GetFileName(file)}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { AppendLog($"NAS queue error: {ex.Message}"); }
+    }
+
+    private bool QueueIncomingJob(string json, string source)
+    {
+        IncomingRenderJob? incoming;
+        try { incoming = JsonSerializer.Deserialize<IncomingRenderJob>(json, JobJsonOptions); }
+        catch (JsonException ex) { AppendLog($"Rejected {source} job: {ex.Message}"); return false; }
+        if (incoming is null || string.IsNullOrWhiteSpace(incoming.JobId)) return false;
+        if (_receivedJobIds.Contains(incoming.JobId)) return true;
+        if (!Path.GetExtension(incoming.BlendFile).Equals(".blend", StringComparison.OrdinalIgnoreCase) || !File.Exists(incoming.BlendFile))
+        {
+            AppendLog($"Rejected {source} job {incoming.JobId}: blend file is not accessible: {incoming.BlendFile}");
+            return false;
+        }
+        _receivedJobIds.Add(incoming.JobId);
+        var job = incoming.ToRenderJob();
+        _queue.Add(job); UpdateQueueState();
+        _autoStartAt = DateTime.Now.AddSeconds(10);
+        WatchCountdownText.Visibility = Visibility.Visible;
+        StatusText.Text = $"{source} job received · {job.CameraName}";
+        AppendLog($"{source} Watch job received from {incoming.SenderUser}@{incoming.SenderMachine}: {job.BlendFile} · {job.CameraName}");
+        return true;
+    }
+
+    private void WatchFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog { Title = "Choose the shared NAS render queue folder", Multiselect = false, InitialDirectory = _cloudQueueFolder };
+        if (dialog.ShowDialog(this) != true) return;
+        _cloudQueueFolder = dialog.FolderName;
+        Directory.CreateDirectory(_cloudQueueFolder);
+        SaveAppSettings(new AppSettings(_cloudQueueFolder));
+        _seenCloudFiles.Clear();
+        foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json")) _seenCloudFiles.Add(file);
+        StatusText.Text = $"NAS queue folder · {_cloudQueueFolder}";
+    }
+
+    private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BlenderRenderLauncher", "settings.json");
+    private static AppSettings LoadAppSettings()
+    {
+        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(null) : new(null); }
+        catch { return new(null); }
+    }
+    private static void SaveAppSettings(AppSettings settings)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     private static string? FindBlender()
@@ -371,6 +525,7 @@ public partial class MainWindow : Window
     {
         if (_queueRunning) { _cancelRequested = true; try { _renderProcess?.Kill(true); } catch { } return; }
         if (_blenderExe is null) return;
+        _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed;
         _queueRunning = true; _cancelRequested = false; SetUiRunning(true); SetLog("Starting render queue…");
         foreach (var job in _queue.Where(j => j.Status == "Waiting").ToList())
         {
@@ -390,6 +545,8 @@ public partial class MainWindow : Window
         _queueRunning = false; _renderProcess = null; SetUiRunning(false); UpdateQueueState();
         StatusText.Text = _cancelRequested ? "Queue cancelled" : _queue.Any(j => j.Status == "Failed") ? "Queue finished with errors" : "Queue finished";
         AppendLog(_cancelRequested ? "\nQueue cancelled." : "\nQueue complete.");
+        if (!_cancelRequested && WatchModeCheckBox.IsChecked == true && _queue.Any(j => j.Status == "Waiting"))
+            _autoStartAt = DateTime.Now.AddSeconds(10);
     }
 
     private void SetUiRunning(bool running)
@@ -429,6 +586,42 @@ public partial class MainWindow : Window
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
+    private sealed record AppSettings(string? CloudQueueFolder);
+
+    private sealed class IncomingRenderJob
+    {
+        public int Version { get; set; } = 1;
+        public string JobId { get; set; } = "";
+        public string BlendFile { get; set; } = "";
+        public string CameraName { get; set; } = "";
+        public int StartFrame { get; set; } = 1;
+        public int EndFrame { get; set; } = 250;
+        public int FrameStep { get; set; } = 1;
+        public string OutputPath { get; set; } = "";
+        public string Engine { get; set; } = "KEEP";
+        public int Width { get; set; } = 1920;
+        public int Height { get; set; } = 1080;
+        public int Scale { get; set; } = 100;
+        public double FrameRate { get; set; } = 24;
+        public string Format { get; set; } = "PNG";
+        public string RenderMode { get; set; } = "FINAL";
+        public bool Overwrite { get; set; } = true;
+        public bool Placeholders { get; set; }
+        public bool IgnoreCompositor { get; set; }
+        public bool TransparentBackground { get; set; }
+        public string SenderUser { get; set; } = "Unknown";
+        public string SenderMachine { get; set; } = "Unknown";
+
+        public RenderJob ToRenderJob() => new()
+        {
+            BlendFile = BlendFile, CameraName = CameraName, StartFrame = StartFrame.ToString(CultureInfo.InvariantCulture),
+            EndFrame = EndFrame.ToString(CultureInfo.InvariantCulture), FrameStep = Math.Max(1, FrameStep).ToString(CultureInfo.InvariantCulture),
+            OutputPath = OutputPath, Engine = Engine, Width = Width.ToString(CultureInfo.InvariantCulture), Height = Height.ToString(CultureInfo.InvariantCulture),
+            Scale = Scale.ToString(CultureInfo.InvariantCulture), FrameRate = FrameRate.ToString("0.###", CultureInfo.InvariantCulture), Format = Format,
+            RenderMode = RenderMode, Overwrite = Overwrite, Placeholders = Placeholders, IgnoreCompositor = IgnoreCompositor,
+            TransparentBackground = TransparentBackground
+        };
+    }
 }
 
 public class CameraSetup : NotifyBase

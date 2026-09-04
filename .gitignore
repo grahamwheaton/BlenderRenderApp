@@ -8,6 +8,8 @@ TESTRENDER/
 *.blend
 *.blend[0-9]
 tmp/
+__pycache__/
+*.pyc
 *_contact_sheet.pdf
 *_contact_sheet*.jpg
 dist/

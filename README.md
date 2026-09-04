@@ -36,3 +36,16 @@ dotnet publish -c Release
 The portable single-file app will be in `bin\Release\net8.0-windows\win-x64\publish`. Teammates can run that `.exe` directly without installing the .NET Desktop Runtime; Blender must still be installed.
 
 V2 uses a three-column workspace: queue selection and camera browsing on the left, focused-camera settings in the centre, and render jobs on the right. Camera checkboxes do not change which camera is being edited.
+
+## V3 Watch mode
+
+V3 adds a **Watch mode** control to the render queue:
+
+- Local jobs arrive only from Blender on the same computer through loopback port `43129`.
+- Cloud jobs are JSON job files written to a shared NAS folder. Every app that was already watching that folder receives each new job once.
+- Each incoming job resets a visible 10-second countdown. When the countdown ends, all waiting jobs render automatically.
+- Existing NAS job files are ignored when Watch mode starts, preventing old work from unexpectedly rendering.
+
+The partner add-on is in `BlenderAddon/render_queue_sender.py`. Install it in Blender, configure its NAS folder to match the folder selected beside Watch mode, and use **Render > Send to Render Queue Local** or **Render > Send to Render Queue Cloud**.
+
+For cooperative rendering from multiple machines, enable **Placeholders** and disable **Overwrite** in Blender before sending the Cloud job. Every machine must be able to access the `.blend` and output paths, preferably through consistent UNC NAS paths.
