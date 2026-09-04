@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Blender Render Launcher</AssemblyName>
+    <ApplicationIcon>Assets\blender-render-icon.ico</ApplicationIcon>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
@@ -17,5 +18,6 @@
     <EmbeddedResource Include="Scripts\*.py" LogicalName="BlenderRenderHeadless.Scripts.%(Filename)%(Extension)" />
     <None Remove="Assets\blender-render-icon.png" />
     <Resource Include="Assets\blender-render-icon.png" />
+    <None Include="Assets\blender-render-icon.ico" />
   </ItemGroup>
 </Project>
