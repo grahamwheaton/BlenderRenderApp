@@ -92,7 +92,7 @@ Distributed final renders and viewport playblasts record the domain user, machin
 
 ## V5.8 experimental tiled stills
 
-Install the V5.8 app on workers and V5.8 sender add-on on the submitting machine. In the add-on preferences enable **Experimental tiled Cloud Images**, set tile size (default 2048) and overlap (default 128), then choose **Cloud Render Image**. Animation and Playblast retain their existing behaviour.
+Install the V5.8 app on workers and V5.8.1 sender add-on on the submitting machine. Set tile size (default 2048) and overlap (default 128) in the add-on preferences, then choose **Render > Cloud Image (tiled)**. **Cloud Render Image** always sends a normal single-frame job. Animation and Playblast retain their existing behaviour.
 
 This first integration supports single-frame Cycles scenes with exactly one active multilayer EXR File Output. The compositor is restricted to Render Layers, Denoise, Mix, reroutes and frames. Unsupported layouts fail explicitly. Blender 5.2 with OpenImageIO and numpy in its bundled Python is required for this experimental path. Tiled jobs use `.tilejob.json`, so old apps do not consume them.
 

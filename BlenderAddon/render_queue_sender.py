@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 8, 0),
+    "version": (5, 8, 1),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -147,7 +147,6 @@ def build_job(context, render_mode, viewport_shading="SOLID", viewport_overlays=
 
 class RENDERQUEUE_Preferences(AddonPreferences):
     bl_idname = __name__
-    tiled_images: BoolProperty(name="Experimental tiled Cloud Images (requires app V5.8)", default=False)
     tile_size: IntProperty(name="Tile size (pixels)", default=2048, min=128, max=8192)
     tile_overlap: IntProperty(name="Tile overlap (pixels)", default=128, min=0, max=512)
 
@@ -165,14 +164,13 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.8.0", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.8.1", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
-        layout.prop(self, "tiled_images")
-        if self.tiled_images:
-            layout.prop(self, "tile_size")
-            layout.prop(self, "tile_overlap")
-            layout.label(text="Cycles stills; one multilayer EXR compositor output.")
+        layout.label(text="Cloud Image (tiled) settings — requires app V5.8")
+        layout.prop(self, "tile_size")
+        layout.prop(self, "tile_overlap")
+        layout.label(text="Cycles stills; one multilayer EXR compositor output.")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
@@ -215,19 +213,32 @@ class RENDERQUEUE_OT_cloud_render_image(Operator):
 
     def execute(self, context):
         try:
-            extra = None
-            if prefs().tiled_images:
-                if context.scene.render.engine != 'CYCLES':
-                    raise RuntimeError('Experimental tiles require Cycles.')
-                if prefs().tile_overlap > prefs().tile_size:
-                    raise RuntimeError('Tile overlap cannot exceed tile size.')
-                extra = {'tileSize': prefs().tile_size, 'tileOverlap': prefs().tile_overlap, 'version': 4}
-            job = write_cloud_job(context, "FINAL", extra=extra, current_frame_only=True)
+            job = write_cloud_job(context, "FINAL", current_frame_only=True)
             self.report({"INFO"}, f"Sent {job['cameraName']} frame {job['startFrame']} as a Cloud Render Image")
             return {"FINISHED"}
         except Exception as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
+
+
+class RENDERQUEUE_OT_cloud_render_tiled(Operator):
+    bl_idname = "render.cloud_render_tiled"
+    bl_label = "Cloud Image (tiled)"
+    bl_description = "Distribute the current Cycles frame as overlapping tiles and assemble a multilayer EXR (experimental)"
+
+    def execute(self, context):
+        try:
+            if context.scene.render.engine != 'CYCLES':
+                raise RuntimeError('Experimental tiles require Cycles.')
+            if prefs().tile_overlap > prefs().tile_size:
+                raise RuntimeError('Tile overlap cannot exceed tile size.')
+            extra = {'tileSize': prefs().tile_size, 'tileOverlap': prefs().tile_overlap, 'version': 4}
+            job = write_cloud_job(context, "FINAL", extra=extra, current_frame_only=True)
+            self.report({'INFO'}, f"Sent {job['cameraName']} frame {job['startFrame']} as tiles")
+            return {'FINISHED'}
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
 
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
@@ -258,6 +269,7 @@ class RENDERQUEUE_OT_cloud_playblast(Operator):
 def draw_render_menu(self, context):
     self.layout.separator()
     self.layout.operator(RENDERQUEUE_OT_cloud_render_image.bl_idname, icon="RENDER_STILL")
+    self.layout.operator(RENDERQUEUE_OT_cloud_render_tiled.bl_idname, icon="IMAGE_DATA")
     self.layout.operator(RENDERQUEUE_OT_cloud_render_animation.bl_idname, icon="RENDER_ANIMATION")
 
 
@@ -269,6 +281,7 @@ def draw_view_menu(self, context):
 classes = (
     RENDERQUEUE_Preferences,
     RENDERQUEUE_OT_cloud_render_image,
+    RENDERQUEUE_OT_cloud_render_tiled,
     RENDERQUEUE_OT_cloud_render_animation,
     RENDERQUEUE_OT_cloud_playblast,
 )
