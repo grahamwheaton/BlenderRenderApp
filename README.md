@@ -87,3 +87,7 @@ V5.4.2 prevents delayed progress messages from an individual Blender worker from
 ## V5.5 render accountability reports
 
 Distributed final renders and viewport playblasts record the domain user, machine, completion time, and output path for every claimed frame. When the sequence completes, the final worker writes a UTF-8 CSV beside the rendered frames named `render-report-CAMERA-JOBID.csv`. Existing frames retained with Overwrite disabled are listed as `Pre-existing / unknown`. The per-frame work only extends the small NAS completion marker that the coordination system already writes; the CSV is assembled after rendering has finished.
+
+## V5.6 cancel everywhere
+
+Distributed waiting or active jobs have a **Cancel everywhere** action. After confirmation, the launcher writes a shared `cancel.json` marker containing the cancelling user and machine. Every V5.6 launcher polls for that marker and terminates its own Blender worker within roughly two seconds; the worker scripts also check the marker before claiming another frame. Completed frames are retained and cancelled jobs are not rediscovered when Watch mode restarts.

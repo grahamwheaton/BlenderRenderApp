@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private string? _blendFile;
     private string? _blenderExe;
     private Process? _renderProcess;
+    private RenderJob? _activeRenderJob;
     private bool _queueRunning;
     private bool _cancelRequested;
     private bool _syncingCameraSettings;
@@ -160,12 +161,19 @@ public partial class MainWindow : Window
 
     private void ProgressTimer_Tick(object? sender, EventArgs e)
     {
-        foreach (var job in _queue.Where(item => item.Distributed && item.Status == "Rendering"))
+        foreach (var job in _queue.Where(item => item.Distributed && item.Status is "Waiting" or "Rendering"))
         {
             try
             {
                 var claimFolder = Path.Combine(job.CoordinationFolder, "_claims", SafeJobId(job.JobId));
                 if (!Directory.Exists(claimFolder)) continue;
+                if (File.Exists(Path.Combine(claimFolder, "cancel.json")))
+                {
+                    job.MarkGloballyCancelled();
+                    if (ReferenceEquals(job, _activeRenderJob))
+                        try { _renderProcess?.Kill(true); } catch { }
+                    continue;
+                }
                 var completed = Directory.EnumerateFiles(claimFolder, "*.done").Count();
                 var activeWorkers = Directory.EnumerateFiles(claimFolder, "*.claim").Count();
                 job.ReportSharedProgress(completed, job.TotalFrameCount, activeWorkers);
@@ -210,7 +218,9 @@ public partial class MainWindow : Window
             return false;
         }
         var coordinationFolder = cloudJobFile is null ? null : Path.GetDirectoryName(cloudJobFile);
-        if (incoming.Distributed && !string.IsNullOrWhiteSpace(coordinationFolder) && File.Exists(Path.Combine(coordinationFolder, "_claims", SafeJobId(incoming.JobId), "complete.json")))
+        if (incoming.Distributed && !string.IsNullOrWhiteSpace(coordinationFolder) &&
+            (File.Exists(Path.Combine(coordinationFolder, "_claims", SafeJobId(incoming.JobId), "complete.json")) ||
+             File.Exists(Path.Combine(coordinationFolder, "_claims", SafeJobId(incoming.JobId), "cancel.json"))))
         {
             _receivedJobIds.Add(incoming.JobId);
             return true;
@@ -621,6 +631,32 @@ public partial class MainWindow : Window
     }
 
     private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { RememberDismissedJob(job); _queue.Remove(job); SaveCurrentSettings(); UpdateQueueState(); } e.Handled = true; }
+    private void CancelEverywhere_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if ((sender as Button)?.Tag is not RenderJob job || !job.Distributed || string.IsNullOrWhiteSpace(job.CoordinationFolder) || string.IsNullOrWhiteSpace(job.JobId)) return;
+        if (MessageBox.Show(this, $"Cancel {job.CameraName} on every rendering machine?\n\nCompleted frames will be kept, but no machine will continue this job.", "Cancel everywhere", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        try
+        {
+            var claimFolder = Path.Combine(job.CoordinationFolder, "_claims", SafeJobId(job.JobId));
+            Directory.CreateDirectory(claimFolder);
+            var cancelPath = Path.Combine(claimFolder, "cancel.json");
+            var temporary = cancelPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            var cancelledBy = $"{Environment.UserDomainName}\\{Environment.UserName}";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(new { cancelledAt = DateTimeOffset.UtcNow, cancelledBy, machine = Environment.MachineName }), Encoding.UTF8);
+            File.Move(temporary, cancelPath, true);
+            job.MarkGloballyCancelled();
+            if (ReferenceEquals(job, _activeRenderJob))
+                try { _renderProcess?.Kill(true); } catch { }
+            AppendLog($"Cancelled distributed job everywhere: {job.CameraName} · requested by {cancelledBy}");
+            StatusText.Text = $"Cancelled everywhere · {job.CameraName}";
+            UpdateQueueState();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Could not cancel distributed job", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
     private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
@@ -652,7 +688,7 @@ public partial class MainWindow : Window
         foreach (var job in _queue.Where(j => j.Status == "Waiting").ToList())
         {
             if (_cancelRequested) { job.Status = "Cancelled"; break; }
-            job.Begin(); StatusText.Text = $"Rendering {job.CameraName} · {job.FrameSummary}";
+            job.Begin(); _activeRenderJob = job; StatusText.Text = $"Rendering {job.CameraName} · {job.FrameSummary}";
             AppendLog($"\n[{job.CameraName}] {job.ModeSummary} · {job.FrameSummary}");
             try
             {
@@ -670,12 +706,14 @@ public partial class MainWindow : Window
                     args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder, job.UsesCompositorOutput ? "1" : "0", job.CompositorOutputNode];
                 }
                 var code = await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
-                job.Status = _cancelRequested ? "Cancelled" : code == 0 ? "Complete" : "Failed";
-                if (code == 0 && !_cancelRequested) job.Finish();
+                if (job.HasGlobalCancellationMarker()) job.MarkGloballyCancelled();
+                job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : code == 0 ? "Complete" : "Failed";
+                if (code == 0 && !_cancelRequested && !job.IsGloballyCancelled) job.Finish();
             }
-            catch (Exception ex) { job.Status = _cancelRequested ? "Cancelled" : "Failed"; AppendLog(ex.Message); }
+            catch (Exception ex) { job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : "Failed"; AppendLog(ex.Message); }
+            finally { if (ReferenceEquals(_activeRenderJob, job)) _activeRenderJob = null; }
         }
-        _queueRunning = false; _renderProcess = null; SetUiRunning(false); UpdateQueueState();
+        _queueRunning = false; _activeRenderJob = null; _renderProcess = null; SetUiRunning(false); UpdateQueueState();
         StatusText.Text = _cancelRequested ? "Queue cancelled" : _queue.Any(j => j.Status == "Failed") ? "Queue finished with errors" : "Queue finished";
         AppendLog(_cancelRequested ? "\nQueue cancelled." : "\nQueue complete.");
         if (!_cancelRequested && WatchModeCheckBox.IsChecked == true && AutoStartCheckBox.IsChecked == true && _queue.Any(j => j.Status == "Waiting"))
@@ -890,7 +928,9 @@ public class RenderJob : NotifyBase
     public bool UsesCompositorOutput { get; init; } public string CompositorOutputNode { get; init; } = "";
     public bool ShowOverlays { get; init; } public string ViewportOverlaySettingsJson { get; init; } = "{}";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
-    private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
+    private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) { OnPropertyChanged(nameof(StatusBrush)); OnPropertyChanged(nameof(GlobalCancelVisibility)); } } }
+    public bool IsGloballyCancelled { get; private set; }
+    public Visibility GlobalCancelVisibility => Distributed && (Status is "Waiting" or "Rendering") ? Visibility.Visible : Visibility.Collapsed;
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
     private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
@@ -907,6 +947,17 @@ public class RenderJob : NotifyBase
         ? $"Frame {_currentFrame} · {_completedFrames} / {_totalFrames} complete · {Progress:0}%"
         : _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
+    public void MarkGloballyCancelled() { IsGloballyCancelled = true; Status = "Cancelled"; Estimate = "Cancelled everywhere"; }
+    public bool HasGlobalCancellationMarker()
+    {
+        if (!Distributed || string.IsNullOrWhiteSpace(CoordinationFolder) || string.IsNullOrWhiteSpace(JobId)) return false;
+        try
+        {
+            var safeJobId = string.Concat(JobId.Where(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.'));
+            return File.Exists(Path.Combine(CoordinationFolder, "_claims", string.IsNullOrWhiteSpace(safeJobId) ? "invalid-job" : safeJobId, "cancel.json"));
+        }
+        catch { return false; }
+    }
     public void Begin() { _startedAt = DateTime.Now; _lastThumbnailUpdate = DateTime.MinValue; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; _activeWorkers = 0; _sharedProgressSamples.Clear(); Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame, string? renderedPath, int? sharedCompleted = null, int? sharedTotal = null)
     {

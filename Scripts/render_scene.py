@@ -151,6 +151,7 @@ def render_distributed():
     claim_dir = os.path.join(coordination_folder, '_claims', safe_job_id)
     os.makedirs(claim_dir, exist_ok=True)
     complete_path = os.path.join(claim_dir, 'complete.json')
+    cancel_path = os.path.join(claim_dir, 'cancel.json')
     frames = list(range(scene.frame_start, scene.frame_end + 1, max(1, scene.frame_step)))
     reported = set()
     base_filepath = scene.render.filepath
@@ -200,6 +201,9 @@ def render_distributed():
             print(f'BRH: Could not write accountability report: {error}', flush=True)
 
     while True:
+        if os.path.exists(cancel_path):
+            print('BRH: Distributed job cancelled everywhere.', flush=True)
+            return
         for frame in frames:
             if frame not in reported and frame_complete(frame):
                 reported.add(frame)
@@ -225,6 +229,9 @@ def render_distributed():
 
         claimed_any = False
         for frame in frames:
+            if os.path.exists(cancel_path):
+                print('BRH: Distributed job cancelled everywhere.', flush=True)
+                return
             if frame_complete(frame):
                 continue
             claim_path = os.path.join(claim_dir, f'{frame}.claim')

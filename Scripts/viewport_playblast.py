@@ -39,6 +39,7 @@ def safe_name(value):
 claim_folder = Path(coordination_folder) / "_claims" / safe_name(job_id)
 claim_folder.mkdir(parents=True, exist_ok=True)
 complete_path = claim_folder / "complete.json"
+cancel_path = claim_folder / "cancel.json"
 frames = list(range(scene.frame_start, scene.frame_end + 1, scene.frame_step))
 base_filepath = scene.render.filepath
 replace_existing = overwrite == "1"
@@ -176,6 +177,9 @@ def run_distributed_capture():
     reported = set()
     with tempfile.TemporaryDirectory(prefix="blender_render_viewport_") as capture_folder:
         while True:
+            if cancel_path.exists():
+                print("BRH: Distributed job cancelled everywhere.", flush=True)
+                return
             for frame in frames:
                 if frame not in reported and frame_complete(frame):
                     reported.add(frame)
@@ -186,6 +190,9 @@ def run_distributed_capture():
                 return
             claimed_any = False
             for frame in frames:
+                if cancel_path.exists():
+                    print("BRH: Distributed job cancelled everywhere.", flush=True)
+                    return
                 if frame_complete(frame):
                     continue
                 claim_path = claim_frame(frame)
