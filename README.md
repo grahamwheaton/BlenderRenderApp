@@ -77,3 +77,7 @@ V5.3.1 remembers cloud job IDs removed with **Clear queue**, **Clear completed**
 ## V5.4 synchronized viewport overlays
 
 Cloud Playblast records the complete viewport-overlay configuration from the 3D View that submitted the job. Every remote viewport worker applies those settings before capturing a frame, so overlays cannot vary according to each machine's saved Blender workspace. For manually queued playblasts, **Viewport overlays** is available in Advanced Options and defaults to the state saved in the loaded blend file.
+
+### V5.4.1 distributed progress
+
+Distributed jobs poll the NAS claim folder every two seconds, so progress updates while other machines finish frames rather than only when the local worker finishes. The queue shows the shared completed-frame count, active worker count, and an ETA calculated from the recent combined throughput of all workers.

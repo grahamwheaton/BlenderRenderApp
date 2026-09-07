@@ -36,6 +36,7 @@ public partial class MainWindow : Window
     private const int LocalWatchPort = 43129;
     private const string DefaultCloudQueueFolder = @"W:\Working Graphics\_3D RESOURCE\CloudRender";
     private readonly DispatcherTimer _watchTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly HashSet<string> _receivedJobIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _dismissedJobIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _seenCloudFiles = new(StringComparer.OrdinalIgnoreCase);
@@ -65,13 +66,15 @@ public partial class MainWindow : Window
         OnlyMyPcCheckBox.IsChecked = savedSettings.OnlyMyPc;
         _suppressWatchChange = false;
         _watchTimer.Tick += WatchTimer_Tick;
+        _progressTimer.Tick += ProgressTimer_Tick;
+        _progressTimer.Start();
         Loaded += (_, _) =>
         {
             var arguments = Environment.GetCommandLineArgs();
             if (arguments.Any(argument => argument.Equals("--auto-start", StringComparison.OrdinalIgnoreCase))) AutoStartCheckBox.IsChecked = true;
             if (arguments.Any(argument => argument.Equals("--watch", StringComparison.OrdinalIgnoreCase))) WatchModeCheckBox.IsChecked = true;
         };
-        Closed += (_, _) => StopWatchMode();
+        Closed += (_, _) => { _progressTimer.Stop(); StopWatchMode(); };
         StatusText.Text = _blenderExe is null ? "Set the location of blender.exe" : $"Ready · {Path.GetFileName(Path.GetDirectoryName(_blenderExe))}";
     }
 
@@ -153,6 +156,25 @@ public partial class MainWindow : Window
         if (remaining > 0) return;
         _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed;
         RenderQueueButton_Click(RenderQueueButton, new RoutedEventArgs());
+    }
+
+    private void ProgressTimer_Tick(object? sender, EventArgs e)
+    {
+        foreach (var job in _queue.Where(item => item.Distributed && item.Status == "Rendering"))
+        {
+            try
+            {
+                var claimFolder = Path.Combine(job.CoordinationFolder, "_claims", SafeJobId(job.JobId));
+                if (!Directory.Exists(claimFolder)) continue;
+                var completed = Directory.EnumerateFiles(claimFolder, "*.done").Count();
+                var activeWorkers = Directory.EnumerateFiles(claimFolder, "*.claim").Count();
+                job.ReportSharedProgress(completed, job.TotalFrameCount, activeWorkers);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Could not poll distributed progress for {job.JobId}: {ex.Message}");
+            }
+        }
     }
 
     private void PollCloudJobs()
@@ -872,22 +894,37 @@ public class RenderJob : NotifyBase
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
     private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
-    private DateTime _startedAt; private DateTime _lastThumbnailUpdate; private int _lastReportedFrame = int.MinValue; private int? _currentFrame; private int? _completedFrames; private int? _totalFrames;
+    private DateTime _startedAt; private DateTime _lastThumbnailUpdate; private int _lastReportedFrame = int.MinValue; private int? _currentFrame; private int? _completedFrames; private int? _totalFrames; private int _activeWorkers;
+    private readonly Queue<(DateTime Time, int Completed)> _sharedProgressSamples = new();
     public string FrameSummary => FrameStep == "1" ? $"Frames {StartFrame}–{EndFrame}" : $"Frames {StartFrame}–{EndFrame} · Step {FrameStep}"; public string ModeSummary => RenderMode == "PLAYBLAST" ? "Playblast" : "Final";
     private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
     public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
     public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return RequiresViewport ? summary + " · True viewport worker" : PreRendered ? summary + " · Viewport capture" : Distributed ? summary + " · NAS claims" : summary; } }
-    public string ProgressLabel => _currentFrame.HasValue && _completedFrames.HasValue && _totalFrames.HasValue
+    public int TotalFrameCount { get { if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return 1; var step = int.TryParse(FrameStep, out var value) ? Math.Max(1, value) : 1; return Math.Max(1, (end - start) / step + 1); } }
+    public string ProgressLabel => Distributed && _completedFrames.HasValue && _totalFrames.HasValue
+        ? $"{_completedFrames} / {_totalFrames} complete · {_activeWorkers} worker{(_activeWorkers == 1 ? "" : "s")} active · {Progress:0}%" + (_currentFrame.HasValue ? $" · This PC: {_currentFrame}" : "")
+        : _currentFrame.HasValue && _completedFrames.HasValue && _totalFrames.HasValue
         ? $"Frame {_currentFrame} · {_completedFrames} / {_totalFrames} complete · {Progress:0}%"
         : _currentFrame.HasValue ? $"Frame {_currentFrame} / {EndFrame} · {Progress:0}%" : $"{Progress:0}%";
     public Brush StatusBrush => Status switch { "Complete" => Brushes.LightGreen, "Failed" => Brushes.Salmon, "Rendering" => Brushes.Orange, "Cancelled" => Brushes.Gray, _ => Brushes.LightGray };
-    public void Begin() { _startedAt = DateTime.Now; _lastThumbnailUpdate = DateTime.MinValue; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
+    public void Begin() { _startedAt = DateTime.Now; _lastThumbnailUpdate = DateTime.MinValue; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; _activeWorkers = 0; _sharedProgressSamples.Clear(); Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame, string? renderedPath, int? sharedCompleted = null, int? sharedTotal = null)
     {
         if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;
         if (!sharedCompleted.HasValue && frame <= _lastReportedFrame) return;
         _lastReportedFrame = frame;
         _currentFrame = frame;
+        if (Distributed && sharedCompleted.HasValue && sharedTotal.HasValue)
+        {
+            var reportedAt = DateTime.Now;
+            if (!string.IsNullOrWhiteSpace(renderedPath) && (reportedAt - _lastThumbnailUpdate >= TimeSpan.FromSeconds(10) || sharedCompleted.Value >= sharedTotal.Value) && File.Exists(renderedPath))
+            {
+                ThumbnailPath = renderedPath;
+                _lastThumbnailUpdate = reportedAt;
+            }
+            ReportSharedProgress(sharedCompleted.Value, sharedTotal.Value, _activeWorkers);
+            return;
+        }
         var step = int.TryParse(FrameStep, out var parsedStep) ? Math.Max(1, parsedStep) : 1;
         var total = Math.Max(1, (end - start) / step + 1);
         var completed = sharedCompleted.HasValue && sharedTotal.HasValue ? Math.Clamp(sharedCompleted.Value, 0, Math.Max(1, sharedTotal.Value)) : Math.Clamp((frame - start) / step + 1, 0, total);
@@ -908,6 +945,35 @@ public class RenderJob : NotifyBase
         var finish = DateTime.Now + remaining;
         var duration = remaining.TotalHours >= 1 ? $"{remaining.TotalHours:0.0}h" : remaining.TotalMinutes >= 1 ? $"{remaining.TotalMinutes:0}m" : $"{Math.Max(1, remaining.TotalSeconds):0}s";
         Estimate = $"Est. {finish:H:mm} · {duration}";
+    }
+    public void ReportSharedProgress(int completed, int total, int activeWorkers)
+    {
+        total = Math.Max(1, total);
+        completed = Math.Clamp(completed, 0, total);
+        _completedFrames = completed;
+        _totalFrames = total;
+        _activeWorkers = activeWorkers;
+        Progress = 100.0 * completed / total;
+        OnPropertyChanged(nameof(ProgressLabel));
+
+        var now = DateTime.Now;
+        if (_sharedProgressSamples.Count == 0 || _sharedProgressSamples.Last().Completed != completed)
+            _sharedProgressSamples.Enqueue((now, completed));
+        while (_sharedProgressSamples.Count > 1 && now - _sharedProgressSamples.Peek().Time > TimeSpan.FromMinutes(2))
+            _sharedProgressSamples.Dequeue();
+        if (_sharedProgressSamples.Count < 2 || completed >= total)
+        {
+            if (completed < total) Estimate = activeWorkers > 0 ? "Measuring network speed…" : "Waiting for workers…";
+            return;
+        }
+        var first = _sharedProgressSamples.Peek();
+        var gained = completed - first.Completed;
+        var seconds = (now - first.Time).TotalSeconds;
+        if (gained <= 0 || seconds <= 0) return;
+        var remaining = TimeSpan.FromSeconds((total - completed) / (gained / seconds));
+        var finish = now + remaining;
+        var duration = remaining.TotalHours >= 1 ? $"{remaining.TotalHours:0.0}h" : remaining.TotalMinutes >= 1 ? $"{remaining.TotalMinutes:0}m" : $"{Math.Max(1, remaining.TotalSeconds):0}s";
+        Estimate = $"Est. {finish:H:mm} · {duration} · all workers";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
     public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading, Distributed = false, UsesCompositorOutput = c.UsesCompositorOutput, CompositorOutputNode = c.CompositorOutputNode, ShowOverlays = c.ShowOverlays, ViewportOverlaySettingsJson = c.ViewportOverlaySettingsJson };
