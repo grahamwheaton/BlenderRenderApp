@@ -83,3 +83,7 @@ Cloud Playblast records the complete viewport-overlay configuration from the 3D 
 Distributed jobs poll the NAS claim folder every two seconds, so progress updates while other machines finish frames rather than only when the local worker finishes. The queue shows the shared completed-frame count, active worker count, and an ETA calculated from the recent combined throughput of all workers.
 
 V5.4.2 prevents delayed progress messages from an individual Blender worker from replacing a newer NAS count, so distributed progress can only move forwards.
+
+## V5.5 render accountability reports
+
+Distributed final renders and viewport playblasts record the domain user, machine, completion time, and output path for every claimed frame. When the sequence completes, the final worker writes a UTF-8 CSV beside the rendered frames named `render-report-CAMERA-JOBID.csv`. Existing frames retained with Overwrite disabled are listed as `Pre-existing / unknown`. The per-frame work only extends the small NAS completion marker that the coordination system already writes; the CSV is assembled after rendering has finished.

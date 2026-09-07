@@ -1,5 +1,7 @@
 import bpy
+import csv
 from fractions import Fraction
+import getpass
 import json
 import os
 from pathlib import Path
@@ -40,6 +42,9 @@ complete_path = claim_folder / "complete.json"
 frames = list(range(scene.frame_start, scene.frame_end + 1, scene.frame_step))
 base_filepath = scene.render.filepath
 replace_existing = overwrite == "1"
+worker_user = getpass.getuser()
+worker_domain = os.environ.get("USERDOMAIN", "").strip()
+worker_author = f"{worker_domain}\\{worker_user}" if worker_domain else worker_user
 
 def done_path(frame):
     return claim_folder / f"{frame}.done"
@@ -116,10 +121,34 @@ def copy_frame(source, destination):
 
 def mark_done(frame):
     temporary = done_path(frame).with_name(f"{frame}.done.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps({"completed_at": time.time(), "machine": socket.gethostname(), "pid": os.getpid()}), encoding="utf-8")
+    temporary.write_text(json.dumps({"completed_at": time.time(), "author": worker_author, "machine": socket.gethostname(), "pid": os.getpid(), "output": str(frame_output(frame))}), encoding="utf-8")
     os.replace(temporary, done_path(frame))
 
+def write_render_report():
+    report_path = frame_output(frames[0]).parent / f"render-report-{safe_name(camera_name)}-{safe_name(job_id)[:8]}.csv"
+    temporary = report_path.with_name(report_path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("w", newline="", encoding="utf-8-sig") as report:
+            writer = csv.writer(report)
+            writer.writerow(["Frame", "Rendered by", "Machine", "Completed", "Output file"])
+            for frame in frames:
+                data = {}
+                try:
+                    data = json.loads(done_path(frame).read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+                completed_at = data.get("completed_at")
+                completed_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(completed_at)) if isinstance(completed_at, (int, float)) else ""
+                writer.writerow([frame, data.get("author", "Pre-existing / unknown"), data.get("machine", ""), completed_text, data.get("output", str(frame_output(frame)))])
+        os.replace(temporary, report_path)
+        print(f"BRH: Render accountability report: {report_path}", flush=True)
+    except Exception as error:
+        temporary.unlink(missing_ok=True)
+        print(f"BRH: Could not write accountability report: {error}", flush=True)
+
 def mark_complete():
+    write_render_report()
     temporary = complete_path.with_name("complete." + uuid.uuid4().hex + ".tmp")
     temporary.write_text(json.dumps({"completed_at": time.time(), "machine": socket.gethostname(), "frames": len(frames), "viewport": True}), encoding="utf-8")
     try:

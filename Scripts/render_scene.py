@@ -1,5 +1,7 @@
 import bpy
+import csv
 from fractions import Fraction
+import getpass
 import json
 import os
 import re
@@ -153,6 +155,9 @@ def render_distributed():
     reported = set()
     base_filepath = scene.render.filepath
     replace_existing = overwrite == '1'
+    worker_user = getpass.getuser()
+    worker_domain = os.environ.get('USERDOMAIN', '').strip()
+    worker_author = f'{worker_domain}\\{worker_user}' if worker_domain else worker_user
 
     def done_path(frame):
         return os.path.join(claim_dir, f'{frame}.done')
@@ -162,6 +167,38 @@ def render_distributed():
             return False
         return os.path.exists(done_path(frame)) or not replace_existing
 
+    def frame_output_path(frame):
+        return compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
+
+    def write_render_report():
+        output_directory = os.path.dirname(frame_output_path(frames[0]))
+        report_name = f"render-report-{re.sub(r'[^A-Za-z0-9_.-]+', '_', camera_name)}-{safe_job_id[:8]}.csv"
+        report_path = os.path.join(output_directory, report_name)
+        temporary_report = report_path + '.' + uuid.uuid4().hex + '.tmp'
+        try:
+            os.makedirs(output_directory, exist_ok=True)
+            with open(temporary_report, 'w', newline='', encoding='utf-8-sig') as report:
+                writer = csv.writer(report)
+                writer.writerow(['Frame', 'Rendered by', 'Machine', 'Completed', 'Output file'])
+                for frame in frames:
+                    data = {}
+                    try:
+                        with open(done_path(frame), 'r', encoding='utf-8') as as_done:
+                            data = json.load(as_done)
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                    completed_at = data.get('completed_at')
+                    completed_text = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at)) if isinstance(completed_at, (int, float)) else ''
+                    writer.writerow([frame, data.get('author', 'Pre-existing / unknown'), data.get('machine', ''), completed_text, data.get('output', frame_output_path(frame))])
+            os.replace(temporary_report, report_path)
+            print(f'BRH: Render accountability report: {report_path}', flush=True)
+        except Exception as error:
+            try:
+                os.unlink(temporary_report)
+            except OSError:
+                pass
+            print(f'BRH: Could not write accountability report: {error}', flush=True)
+
     while True:
         for frame in frames:
             if frame not in reported and frame_complete(frame):
@@ -170,6 +207,7 @@ def render_distributed():
                 print(f"BRH_FRAME_DONE:{frame}|{path}|{len(reported)}|{len(frames)}", flush=True)
         active_claims = [name for name in os.listdir(claim_dir) if name.endswith('.claim')]
         if len(reported) == len(frames) and not active_claims:
+            write_render_report()
             temporary_complete = complete_path + '.' + uuid.uuid4().hex + '.tmp'
             with open(temporary_complete, 'w', encoding='utf-8') as complete_file:
                 json.dump({"completed_at": time.time(), "machine": socket.gethostname(), "frames": len(frames)}, complete_file)
@@ -211,11 +249,11 @@ def render_distributed():
                 if not valid_output(frame):
                     raise RuntimeError(f"Frame {frame} did not produce a non-empty output file.")
                 temporary_done = done_path(frame) + '.' + uuid.uuid4().hex + '.tmp'
+                path = frame_output_path(frame)
                 with open(temporary_done, 'w', encoding='utf-8') as done_file:
-                    json.dump({"completed_at": time.time(), "machine": socket.gethostname()}, done_file)
+                    json.dump({"completed_at": time.time(), "author": worker_author, "machine": socket.gethostname(), "pid": os.getpid(), "output": path}, done_file)
                 os.replace(temporary_done, done_path(frame))
                 reported.add(frame)
-                path = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
                 print(f"BRH_FRAME_DONE:{frame}|{path}|{len(reported)}|{len(frames)}", flush=True)
             finally:
                 stop_heartbeat.set()
