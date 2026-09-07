@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 7, 0),
+    "version": (5, 8, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -16,7 +16,7 @@ import socket
 import time
 import uuid
 from pathlib import Path
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, StringProperty, IntProperty
 from bpy.types import AddonPreferences, Operator
 
 def prefs():
@@ -147,6 +147,9 @@ def build_job(context, render_mode, viewport_shading="SOLID", viewport_overlays=
 
 class RENDERQUEUE_Preferences(AddonPreferences):
     bl_idname = __name__
+    tiled_images: BoolProperty(name="Experimental tiled Cloud Images (requires app V5.8)", default=False)
+    tile_size: IntProperty(name="Tile size (pixels)", default=2048, min=128, max=8192)
+    tile_overlap: IntProperty(name="Tile overlap (pixels)", default=128, min=0, max=512)
 
     shared_queue_folder: StringProperty(
         name="Shared NAS Queue Folder",
@@ -162,9 +165,14 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.7.0", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.8.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
+        layout.prop(self, "tiled_images")
+        if self.tiled_images:
+            layout.prop(self, "tile_size")
+            layout.prop(self, "tile_overlap")
+            layout.label(text="Cycles stills; one multilayer EXR compositor output.")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
@@ -177,7 +185,8 @@ def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None, 
     job = build_job(context, render_mode, viewport_shading, viewport_overlays, current_frame_only)
     if extra:
         job.update(extra)
-    filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
+    extension = 'tilejob.json' if job.get('tileSize', 0) else 'renderjob.json'
+    filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.{extension}"
     temporary = folder / ("." + filename + ".tmp")
     temporary.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(str(temporary), str(folder / filename))
@@ -206,7 +215,14 @@ class RENDERQUEUE_OT_cloud_render_image(Operator):
 
     def execute(self, context):
         try:
-            job = write_cloud_job(context, "FINAL", current_frame_only=True)
+            extra = None
+            if prefs().tiled_images:
+                if context.scene.render.engine != 'CYCLES':
+                    raise RuntimeError('Experimental tiles require Cycles.')
+                if prefs().tile_overlap > prefs().tile_size:
+                    raise RuntimeError('Tile overlap cannot exceed tile size.')
+                extra = {'tileSize': prefs().tile_size, 'tileOverlap': prefs().tile_overlap, 'version': 4}
+            job = write_cloud_job(context, "FINAL", extra=extra, current_frame_only=True)
             self.report({"INFO"}, f"Sent {job['cameraName']} frame {job['startFrame']} as a Cloud Render Image")
             return {"FINISHED"}
         except Exception as error:

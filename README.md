@@ -90,4 +90,16 @@ Distributed final renders and viewport playblasts record the domain user, machin
 
 ## V5.6 cancel everywhere
 
+## V5.8 experimental tiled stills
+
+Install the V5.8 app on workers and V5.8 sender add-on on the submitting machine. In the add-on preferences enable **Experimental tiled Cloud Images**, set tile size (default 2048) and overlap (default 128), then choose **Cloud Render Image**. Animation and Playblast retain their existing behaviour.
+
+This first integration supports single-frame Cycles scenes with exactly one active multilayer EXR File Output. The compositor is restricted to Render Layers, Denoise, Mix, reroutes and frames. Unsupported layouts fail explicitly. Blender 5.2 with OpenImageIO and numpy in its bundled Python is required for this experimental path. Tiled jobs use `.tilejob.json`, so old apps do not consume them.
+
+Workers claim tiles, run the compositor on overlapping regions, and retain the tile EXRs under the job's NAS `_claims` folder. One worker claims final assembly and launches a separate scanline stitch process. Final output is `CAMERA_FRAME_JOBID.exr` with a tile accountability CSV beside it, in the selected output directory. The unique filename avoids overwriting existing outputs; normal image format and overwrite choices do not apply to this experimental EXR mode. Keep the claim directory until the final output is verified; cleanup is manual for now.
+
+The app displays tile counts and a finishing message at 100% while assembly runs. Cancel everywhere applies to tiled jobs too. Validation includes two independent local Blender worker processes sharing four tiles and producing one final EXR/CSV. Different PCs, network interruptions, huge images, and arbitrary compositor layouts remain unvalidated. Denoising is close but not identical to full-frame results; see `Prototypes/TiledRendering/TILED_RENDERING_RESULTS.md`.
+
+Executable distributions now include the version number: `Blender Render Launcher v5.8.0.exe`.
+
 Distributed waiting or active jobs have a **Cancel everywhere** action. After confirmation, the launcher writes a shared `cancel.json` marker containing the cancelling user and machine. Every V5.6 launcher polls for that marker and terminates its own Blender worker within roughly two seconds; the worker scripts also check the marker before claiming another frame. Completed frames are retained and cancelled jobs are not rediscovered when Watch mode restarts.

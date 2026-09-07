@@ -190,7 +190,7 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(_cloudQueueFolder) || !Directory.Exists(_cloudQueueFolder)) return;
         try
         {
-            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").OrderBy(File.GetCreationTimeUtc))
+            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.tilejob.json")).OrderBy(File.GetCreationTimeUtc))
             {
                 if (!_seenCloudFiles.Add(file)) continue;
                 try { QueueIncomingJob(File.ReadAllText(file, Encoding.UTF8), "Cloud", file); }
@@ -694,7 +694,13 @@ public partial class MainWindow : Window
             {
                 string script;
                 string[] args;
-                if (job.RequiresViewport)
+                if (job.TileSize > 0)
+                {
+                    ExtractScript("stitch_tiles.py");
+                    script = ExtractScript("tile_worker.py");
+                    args = ["--background", "--disable-autoexec", job.BlendFile, "--python", script, "--", JsonSerializer.Serialize(new { job.BlendFile, job.CameraName, job.StartFrame, job.EndFrame, job.Width, job.Height, job.Scale, job.Engine, job.IgnoreCompositor, job.TransparentBackground, job.OutputPath, job.JobId, job.CoordinationFolder, job.TileSize, job.TileOverlap })];
+                }
+                else if (job.RequiresViewport)
                 {
                     if (string.IsNullOrWhiteSpace(job.CoordinationFolder)) throw new InvalidOperationException("Viewport jobs require the shared NAS coordination folder.");
                     script = ExtractScript("viewport_playblast.py");
@@ -766,6 +772,8 @@ public partial class MainWindow : Window
 
     private sealed class IncomingRenderJob
     {
+        public int TileSize { get; set; }
+        public int TileOverlap { get; set; } = 128;
         public int Version { get; set; } = 1;
         public string JobId { get; set; } = "";
         public string BlendFile { get; set; } = "";
@@ -801,6 +809,7 @@ public partial class MainWindow : Window
         {
             var job = new RenderJob
             {
+            TileSize = TileSize, TileOverlap = TileOverlap,
             BlendFile = BlendFile, CameraName = CameraName, StartFrame = StartFrame.ToString(CultureInfo.InvariantCulture),
             EndFrame = EndFrame.ToString(CultureInfo.InvariantCulture), FrameStep = Math.Max(1, FrameStep).ToString(CultureInfo.InvariantCulture),
             OutputPath = OutputPath, Engine = Engine, Width = Width.ToString(CultureInfo.InvariantCulture), Height = Height.ToString(CultureInfo.InvariantCulture),
@@ -921,6 +930,8 @@ public class CameraSetup : NotifyBase
 
 public class RenderJob : NotifyBase
 {
+    public int TileSize { get; init; }
+    public int TileOverlap { get; init; } = 128;
     public string BlendFile { get; init; } = ""; public string CameraName { get; init; } = ""; public string StartFrame { get; init; } = ""; public string EndFrame { get; init; } = ""; public string FrameStep { get; init; } = "1"; public string OutputPath { get; init; } = "";
     public string RenderMode { get; init; } = "FINAL"; public string Engine { get; init; } = "KEEP"; public string Width { get; init; } = ""; public string Height { get; init; } = ""; public string Scale { get; init; } = ""; public string FrameRate { get; init; } = "24"; public string Format { get; init; } = "PNG"; public string ViewportShading { get; init; } = "SOLID";
     public bool Distributed { get; init; } public string JobId { get; init; } = ""; public string CoordinationFolder { get; init; } = "";
@@ -940,8 +951,8 @@ public class RenderJob : NotifyBase
     private string? _thumbnailPath; public string? ThumbnailPath { get => _thumbnailPath; set => Set(ref _thumbnailPath, value); }
     public string ViewportShadingLabel => ViewportShading switch { "WIREFRAME" => "Wireframe", "MATERIAL" => "Material Preview", "RENDERED" => "Rendered", _ => "Solid" };
     public string SettingsSummary { get { var summary = RenderMode == "PLAYBLAST" ? $"{Width}×{Height} · {FrameRate} FPS · {Format} · {ViewportShadingLabel}" : $"{Width}×{Height} · {FrameRate} FPS · {Format}"; return RequiresViewport ? summary + " · True viewport worker" : PreRendered ? summary + " · Viewport capture" : Distributed ? summary + " · NAS claims" : summary; } }
-    public int TotalFrameCount { get { if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return 1; var step = int.TryParse(FrameStep, out var value) ? Math.Max(1, value) : 1; return Math.Max(1, (end - start) / step + 1); } }
-    public string ProgressLabel => Distributed && _completedFrames.HasValue && _totalFrames.HasValue
+    public int TotalFrameCount { get { if (TileSize > 0 && int.TryParse(Width, out var w) && int.TryParse(Height, out var h) && int.TryParse(Scale, out var scale)) return (int)(Math.Ceiling(Math.Max(1,w * (long)scale / 100)/(double)TileSize) * Math.Ceiling(Math.Max(1,h * (long)scale / 100)/(double)TileSize)); if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return 1; var step = int.TryParse(FrameStep, out var value) ? Math.Max(1, value) : 1; return Math.Max(1, (end - start) / step + 1); } }
+    public string ProgressLabel => TileSize > 0 ? $"{_completedFrames ?? 0} / {TotalFrameCount} tiles · {Progress:0}%" : Distributed && _completedFrames.HasValue && _totalFrames.HasValue
         ? $"{_completedFrames} / {_totalFrames} complete · {_activeWorkers} worker{(_activeWorkers == 1 ? "" : "s")} active · {Progress:0}%" + (_currentFrame.HasValue ? $" · This PC: {_currentFrame}" : "")
         : _currentFrame.HasValue && _completedFrames.HasValue && _totalFrames.HasValue
         ? $"Frame {_currentFrame} · {_completedFrames} / {_totalFrames} complete · {Progress:0}%"
@@ -1019,6 +1030,7 @@ public class RenderJob : NotifyBase
             _sharedProgressSamples.Dequeue();
         if (_sharedProgressSamples.Count < 2 || completed >= total)
         {
+            if (TileSize > 0 && completed >= total) Estimate = "Tiles ready · assembling EXR…";
             if (completed < total) Estimate = activeWorkers > 0 ? "Measuring network speed…" : "Waiting for workers…";
             return;
         }
