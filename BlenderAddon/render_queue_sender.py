@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 4, 0),
+    "version": (5, 7, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -93,7 +93,7 @@ def render_output(scene):
     return bpy.path.abspath(combined), True, node.name, node_format
 
 
-def build_job(context, render_mode, viewport_shading="SOLID", viewport_overlays=None):
+def build_job(context, render_mode, viewport_shading="SOLID", viewport_overlays=None, current_frame_only=False):
     scene = context.scene
     camera = scene.camera
     if camera is None or camera.type != "CAMERA":
@@ -111,13 +111,15 @@ def build_job(context, render_mode, viewport_shading="SOLID", viewport_overlays=
     width, height, scale = camera_resolution(scene, camera)
     output_path, uses_compositor_output, compositor_output_node, output_format = render_output(scene)
     user, machine = sender_stamp()
+    start_frame = int(scene.frame_current) if current_frame_only else int(scene.frame_start)
+    end_frame = int(scene.frame_current) if current_frame_only else int(scene.frame_end)
     return {
         "version": 1,
         "jobId": str(uuid.uuid4()),
         "blendFile": blend_file,
         "cameraName": camera.name,
-        "startFrame": int(scene.frame_start),
-        "endFrame": int(scene.frame_end),
+        "startFrame": start_frame,
+        "endFrame": end_frame,
         "frameStep": int(scene.frame_step),
         "outputPath": output_path,
         "usesCompositorOutput": uses_compositor_output,
@@ -160,19 +162,19 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.4.0", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.7.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
-def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None, viewport_overlays=None):
+def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None, viewport_overlays=None, current_frame_only=False):
     folder_text = clean_path(prefs().shared_queue_folder)
     if not folder_text:
         raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
     folder = Path(folder_text)
     folder.mkdir(parents=True, exist_ok=True)
-    job = build_job(context, render_mode, viewport_shading, viewport_overlays)
+    job = build_job(context, render_mode, viewport_shading, viewport_overlays, current_frame_only)
     if extra:
         job.update(extra)
     filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
@@ -182,15 +184,30 @@ def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None, 
     return job
 
 
-class RENDERQUEUE_OT_cloud_render(Operator):
-    bl_idname = "render.cloud_render"
-    bl_label = "Cloud Render (V5.4)"
-    bl_description = "Send the active camera to every renderer watching the shared NAS queue"
+class RENDERQUEUE_OT_cloud_render_animation(Operator):
+    bl_idname = "render.cloud_render_animation"
+    bl_label = "Cloud Render Animation"
+    bl_description = "Send the complete scene frame range to every renderer watching the shared NAS queue"
 
     def execute(self, context):
         try:
             job = write_cloud_job(context, "FINAL")
-            self.report({"INFO"}, f"Sent {job['cameraName']} as a Cloud Render")
+            self.report({"INFO"}, f"Sent {job['cameraName']} frames {job['startFrame']}-{job['endFrame']} as a Cloud Render Animation")
+            return {"FINISHED"}
+        except Exception as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+
+class RENDERQUEUE_OT_cloud_render_image(Operator):
+    bl_idname = "render.cloud_render_image"
+    bl_label = "Cloud Render Image"
+    bl_description = "Send only the current frame to every renderer watching the shared NAS queue"
+
+    def execute(self, context):
+        try:
+            job = write_cloud_job(context, "FINAL", current_frame_only=True)
+            self.report({"INFO"}, f"Sent {job['cameraName']} frame {job['startFrame']} as a Cloud Render Image")
             return {"FINISHED"}
         except Exception as error:
             self.report({"ERROR"}, str(error))
@@ -199,7 +216,7 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
-    bl_label = "Cloud Playblast (V5.4)"
+    bl_label = "Cloud Render Playblast"
     bl_description = "Send a true viewport playblast job to a listening Blender Render app"
 
     def execute(self, context):
@@ -224,7 +241,8 @@ class RENDERQUEUE_OT_cloud_playblast(Operator):
 
 def draw_render_menu(self, context):
     self.layout.separator()
-    self.layout.operator(RENDERQUEUE_OT_cloud_render.bl_idname, icon="NETWORK_DRIVE")
+    self.layout.operator(RENDERQUEUE_OT_cloud_render_image.bl_idname, icon="RENDER_STILL")
+    self.layout.operator(RENDERQUEUE_OT_cloud_render_animation.bl_idname, icon="RENDER_ANIMATION")
 
 
 def draw_view_menu(self, context):
@@ -234,7 +252,8 @@ def draw_view_menu(self, context):
 
 classes = (
     RENDERQUEUE_Preferences,
-    RENDERQUEUE_OT_cloud_render,
+    RENDERQUEUE_OT_cloud_render_image,
+    RENDERQUEUE_OT_cloud_render_animation,
     RENDERQUEUE_OT_cloud_playblast,
 )
 

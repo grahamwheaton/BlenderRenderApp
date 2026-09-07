@@ -1,9 +1,10 @@
-# Blender Render Queue Sender
+# Blender Render Queue Sender V5.7
 
 Install `render_queue_sender.py` as a Blender add-on.
 
-- **Render > Cloud Render** sends the active camera as a final render.
-- **3D View > View > Cloud Playblast** sends the active camera as a Workbench playblast.
+- **Render > Cloud Render Image** sends only the current frame.
+- **Render > Cloud Render Animation** sends the complete configured frame range.
+- **3D View > View > Cloud Render Playblast** sends the active camera as a viewport playblast.
 - Both commands write a job to the configured shared NAS queue folder. Every V3 app already watching that folder receives the job once.
 
 Set the same NAS folder in the add-on preferences and with the folder button beside **Watch mode** in the desktop app. Jobs reference the existing `.blend` and output paths; they do not copy the Blender file.
