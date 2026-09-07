@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private const string DefaultCloudQueueFolder = @"W:\Working Graphics\_3D RESOURCE\CloudRender";
     private readonly DispatcherTimer _watchTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly HashSet<string> _receivedJobIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _dismissedJobIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _seenCloudFiles = new(StringComparer.OrdinalIgnoreCase);
     private UdpClient? _localListener;
     private CancellationTokenSource? _watchCancellation;
@@ -53,6 +54,8 @@ public partial class MainWindow : Window
         QueueItems.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(QueueItems_Click));
         _blenderExe = FindBlender();
         var savedSettings = LoadAppSettings();
+        foreach (var jobId in savedSettings.DismissedJobIds ?? [])
+            if (!string.IsNullOrWhiteSpace(jobId)) _dismissedJobIds.Add(jobId);
         _cloudQueueFolder = string.IsNullOrWhiteSpace(savedSettings.CloudQueueFolder) ? DefaultCloudQueueFolder : savedSettings.CloudQueueFolder;
         var startupArguments = Environment.GetCommandLineArgs();
         var cloudFolderIndex = Array.FindIndex(startupArguments, argument => argument.Equals("--cloud-folder", StringComparison.OrdinalIgnoreCase));
@@ -174,6 +177,11 @@ public partial class MainWindow : Window
         catch (JsonException ex) { AppendLog($"Rejected {source} job: {ex.Message}"); return false; }
         if (incoming is null || string.IsNullOrWhiteSpace(incoming.JobId)) return false;
         if (_receivedJobIds.Contains(incoming.JobId)) return true;
+        if (_dismissedJobIds.Contains(incoming.JobId))
+        {
+            _receivedJobIds.Add(incoming.JobId);
+            return true;
+        }
         if (OnlyMyPcCheckBox.IsChecked == true && !incoming.SenderMachine.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
         {
             AppendLog($"Ignored {source} job from {incoming.SenderUser}@{incoming.SenderMachine} · ONLY MY PC is enabled");
@@ -205,7 +213,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         _cloudQueueFolder = dialog.FolderName;
         Directory.CreateDirectory(_cloudQueueFolder);
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true));
+        SaveCurrentSettings();
         _seenCloudFiles.Clear();
         foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json"))
             if (!IsDistributedJobFile(file)) _seenCloudFiles.Add(file);
@@ -232,7 +240,7 @@ public partial class MainWindow : Window
     private void AutoStart_Changed(object sender, RoutedEventArgs e)
     {
         if (_suppressWatchChange) return;
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true));
+        SaveCurrentSettings();
         if (AutoStartCheckBox.IsChecked == true && WatchModeCheckBox.IsChecked == true && _queue.Any(job => job.Status == "Waiting")) ResetAutoStartCountdown();
         else { _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed; }
     }
@@ -240,7 +248,7 @@ public partial class MainWindow : Window
     private void OnlyMyPc_Changed(object sender, RoutedEventArgs e)
     {
         if (_suppressWatchChange) return;
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true));
+        SaveCurrentSettings();
         StatusText.Text = OnlyMyPcCheckBox.IsChecked == true ? $"Watching jobs from {Environment.MachineName} only" : "Watching jobs from all computers";
     }
 
@@ -261,6 +269,10 @@ public partial class MainWindow : Window
     {
         Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
         File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
+    }
+    private void SaveCurrentSettings()
+    {
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList()));
     }
 
     private static string? FindBlender()
@@ -585,7 +597,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { _queue.Remove(job); UpdateQueueState(); } e.Handled = true; }
+    private void RemoveQueueItem_Click(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is RenderJob job && job.CanRemove) { RememberDismissedJob(job); _queue.Remove(job); SaveCurrentSettings(); UpdateQueueState(); } e.Handled = true; }
     private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
@@ -603,8 +615,9 @@ public partial class MainWindow : Window
         }
         Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
     }
-    private void ClearCompletedButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) _queue.Remove(job); UpdateQueueState(); }
-    private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { if (_queueRunning) return; _queue.Clear(); UpdateQueueState(); StatusText.Text = "Render queue cleared"; }
+    private void ClearCompletedButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) { RememberDismissedJob(job); _queue.Remove(job); } SaveCurrentSettings(); UpdateQueueState(); }
+    private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { if (_queueRunning) return; foreach (var job in _queue) RememberDismissedJob(job); _queue.Clear(); SaveCurrentSettings(); UpdateQueueState(); StatusText.Text = "Render queue cleared permanently"; }
+    private void RememberDismissedJob(RenderJob job) { if (!string.IsNullOrWhiteSpace(job.JobId)) _dismissedJobIds.Add(job.JobId); }
     private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; QueueCountText.Text = $"{_queue.Count} job{(_queue.Count == 1 ? "" : "s")}"; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting") || _queueRunning; RenderQueueButton.Content = _queueRunning ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs"; }
 
     private async void RenderQueueButton_Click(object sender, RoutedEventArgs e)
@@ -688,7 +701,7 @@ public partial class MainWindow : Window
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
-    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false);
+    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null);
 
     private sealed class IncomingRenderJob
     {

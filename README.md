@@ -71,3 +71,5 @@ Queue thumbnails are refreshed from the latest completed frame at most once ever
 ## V5.3 output detection and frame-range controls
 
 When **Output** is disabled in Blender's Output Properties, the launcher detects the first enabled, connected compositor **File Output** node and uses its directory, filename template, and file format. The focused camera shows a **COMPOSITOR FILE OUTPUT** badge when this fallback is active. Stills-only controls have been removed, and **Range from camera keyframes** now sits directly beneath the focused camera's Frame Range fields.
+
+V5.3.1 remembers cloud job IDs removed with **Clear queue**, **Clear completed**, or the individual remove button. Dismissed jobs are not reconstructed from NAS claim files after the app restarts.
