@@ -1,5 +1,17 @@
 # Tiled rendering prototype — second round
 
+## V5.8 worker integration follow-up
+
+Two independent local Blender processes completed a 1536 x 1024 image using six 512-pixel cores and 128-pixel overlaps. Each process rendered three tiles; one claimed assembly and produced one EXR and one CSV. Tests used a temporary 16-sample override and did not save the source blend.
+
+Every output tile-core pixel was compared bit-for-bit against the assembled file in eight-row strips, across all 88 channels. All matched, Cryptomatte metadata was retained, and all six CSV records contained user/machine attribution. This compares assembly against the source tiles, not against a full-frame render.
+
+A new worker reopening the completed job exited without changing any tile completion timestamps. A separate two-worker test placed a cancellation marker after a tile claim was acquired: both exited and no final EXR or complete marker was published. The script test checks cooperative cancellation between operations; it does not verify the WPF app's immediate process-kill path.
+
+Output: `C:\Users\Graham\Documents\ChatGPT\BlenderRenderHeadless\tile-worker-tests\ed4aaafdd9d442fcbb79dba4a8374861\output\SprayCans_0002_tile-test.exr`.
+
+Still unverified: separate physical machines, NAS failures, interrupted-worker stale-claim recovery, and 15k production-sized scenes. No new executable was required for this validation round.
+
 Source: `C:\Users\Graham\Documents\BlenderRenderApp\RENDER_MID GRAY.blend`.
 The blend file was opened with factory startup and automatic scripts disabled. It was not saved or modified on disk. The current compositor has four denoisers.
 
