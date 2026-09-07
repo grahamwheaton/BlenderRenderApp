@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 3, 1),
+    "version": (5, 4, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -52,6 +52,23 @@ def camera_resolution(scene, camera):
     return int(width), int(height), int(scale)
 
 
+def overlay_settings(space_data):
+    overlay = getattr(space_data, "overlay", None)
+    if overlay is None:
+        return {}
+    settings = {}
+    for prop in overlay.bl_rna.properties:
+        if prop.identifier == "rna_type" or prop.is_readonly:
+            continue
+        try:
+            value = getattr(overlay, prop.identifier)
+            if isinstance(value, (bool, int, float, str)):
+                settings[prop.identifier] = value
+        except Exception:
+            pass
+    return settings
+
+
 def render_output(scene):
     if getattr(scene.render, "save_output", True):
         return bpy.path.abspath(scene.render.filepath), False, "", scene.render.image_settings.file_format
@@ -76,7 +93,7 @@ def render_output(scene):
     return bpy.path.abspath(combined), True, node.name, node_format
 
 
-def build_job(context, render_mode, viewport_shading="SOLID"):
+def build_job(context, render_mode, viewport_shading="SOLID", viewport_overlays=None):
     scene = context.scene
     camera = scene.camera
     if camera is None or camera.type != "CAMERA":
@@ -113,6 +130,8 @@ def build_job(context, render_mode, viewport_shading="SOLID"):
         "format": output_format,
         "renderMode": render_mode,
         "viewportShading": viewport_shading,
+        "showOverlays": bool((viewport_overlays or {}).get("show_overlays", False)),
+        "viewportOverlaySettings": viewport_overlays or {},
         "distributed": True,
         "overwrite": bool(scene.render.use_overwrite),
         "placeholders": bool(scene.render.use_placeholder),
@@ -141,19 +160,19 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.3.1", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.4.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Use the same NAS queue folder in the V3 desktop app.")
 
 
-def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None):
+def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None, viewport_overlays=None):
     folder_text = clean_path(prefs().shared_queue_folder)
     if not folder_text:
         raise RuntimeError("Set the Shared NAS Queue Folder in this add-on's preferences first.")
     folder = Path(folder_text)
     folder.mkdir(parents=True, exist_ok=True)
-    job = build_job(context, render_mode, viewport_shading)
+    job = build_job(context, render_mode, viewport_shading, viewport_overlays)
     if extra:
         job.update(extra)
     filename = f"{time.strftime('%Y%m%d_%H%M%S')}_{job['jobId']}.renderjob.json"
@@ -165,7 +184,7 @@ def write_cloud_job(context, render_mode, viewport_shading="SOLID", extra=None):
 
 class RENDERQUEUE_OT_cloud_render(Operator):
     bl_idname = "render.cloud_render"
-    bl_label = "Cloud Render (V5.3.1)"
+    bl_label = "Cloud Render (V5.4)"
     bl_description = "Send the active camera to every renderer watching the shared NAS queue"
 
     def execute(self, context):
@@ -180,7 +199,7 @@ class RENDERQUEUE_OT_cloud_render(Operator):
 
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
-    bl_label = "Cloud Playblast (V5.3.1)"
+    bl_label = "Cloud Playblast (V5.4)"
     bl_description = "Send a true viewport playblast job to a listening Blender Render app"
 
     def execute(self, context):
@@ -190,11 +209,12 @@ class RENDERQUEUE_OT_cloud_playblast(Operator):
             if context.scene.render.image_settings.file_format == "FFMPEG":
                 raise RuntimeError("V5 Cloud Playblast currently requires an image format such as JPEG or PNG, not FFmpeg.")
             shading = getattr(getattr(context.space_data, "shading", None), "type", "SOLID")
+            overlays = overlay_settings(context.space_data)
             job = write_cloud_job(context, "PLAYBLAST", shading, {
                 "version": 3,
                 "distributed": True,
                 "requiresViewport": True,
-            })
+            }, overlays)
             self.report({"INFO"}, f"Sent {job['cameraName']} viewport playblast to the render queue")
             return {"FINISHED"}
         except Exception as error:

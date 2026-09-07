@@ -19,6 +19,27 @@ saved_use_compositing = scene.render.use_compositing
 saved_film_transparent = scene.render.film_transparent
 saved_save_output = getattr(scene.render, "save_output", True)
 
+def saved_viewport_overlay_settings():
+    for screen in bpy.data.screens:
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            overlay = area.spaces.active.overlay
+            settings = {}
+            for prop in overlay.bl_rna.properties:
+                if prop.identifier == "rna_type" or prop.is_readonly:
+                    continue
+                try:
+                    value = getattr(overlay, prop.identifier)
+                    if isinstance(value, (bool, int, float, str)):
+                        settings[prop.identifier] = value
+                except Exception:
+                    pass
+            return settings
+    return {"show_overlays": False}
+
+viewport_overlay_settings = saved_viewport_overlay_settings()
+
 def compositor_file_output():
     tree = getattr(scene, "compositing_node_group", None) or getattr(scene, "node_tree", None)
     if tree is None:
@@ -178,6 +199,8 @@ data = {
     "save_output": saved_save_output,
     "uses_compositor_output": compositor_output is not None,
     "compositor_output_node": compositor_output["node"] if compositor_output else None,
+    "show_overlays": bool(viewport_overlay_settings.get("show_overlays", False)),
+    "viewport_overlay_settings": viewport_overlay_settings,
     "render_engine": saved_engine,
     "resolution_x": saved_x,
     "resolution_y": saved_y,

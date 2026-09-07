@@ -73,3 +73,7 @@ Queue thumbnails are refreshed from the latest completed frame at most once ever
 When **Output** is disabled in Blender's Output Properties, the launcher detects the first enabled, connected compositor **File Output** node and uses its directory, filename template, and file format. The focused camera shows a **COMPOSITOR FILE OUTPUT** badge when this fallback is active. Stills-only controls have been removed, and **Range from camera keyframes** now sits directly beneath the focused camera's Frame Range fields.
 
 V5.3.1 remembers cloud job IDs removed with **Clear queue**, **Clear completed**, or the individual remove button. Dismissed jobs are not reconstructed from NAS claim files after the app restarts.
+
+## V5.4 synchronized viewport overlays
+
+Cloud Playblast records the complete viewport-overlay configuration from the 3D View that submitted the job. Every remote viewport worker applies those settings before capturing a frame, so overlays cannot vary according to each machine's saved Blender workspace. For manually queued playblasts, **Viewport overlays** is available in Advanced Options and defaults to the state saved in the loaded blend file.

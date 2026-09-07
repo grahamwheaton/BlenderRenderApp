@@ -378,7 +378,8 @@ public partial class MainWindow : Window
                     Width = cameraResolution.resolution_x.ToString(CultureInfo.InvariantCulture), Height = cameraResolution.resolution_y.ToString(CultureInfo.InvariantCulture),
                     Scale = cameraResolution.resolution_percentage.ToString(CultureInfo.InvariantCulture),
                     FrameRate = scene.frame_rate.ToString("0.###", CultureInfo.InvariantCulture), Format = scene.file_format, TransparentBackground = scene.film_transparent,
-                    Overwrite = scene.use_overwrite, Placeholders = scene.use_placeholder, IgnoreCompositor = !scene.use_compositing
+                    Overwrite = scene.use_overwrite, Placeholders = scene.use_placeholder, IgnoreCompositor = !scene.use_compositing,
+                    ShowOverlays = scene.show_overlays, ViewportOverlaySettingsJson = JsonSerializer.Serialize(scene.viewport_overlay_settings)
                 };
                 cameraSetup.SettingChanged = CameraSettingChanged;
                 cameraSetup.SelectionChanged = UpdateCameraSelectionCount;
@@ -639,7 +640,7 @@ public partial class MainWindow : Window
                 {
                     if (string.IsNullOrWhiteSpace(job.CoordinationFolder)) throw new InvalidOperationException("Viewport jobs require the shared NAS coordination folder.");
                     script = ExtractScript("viewport_playblast.py");
-                    args = [job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.ViewportShading, job.Overwrite ? "1" : "0", job.JobId, job.CoordinationFolder];
+                    args = [job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.ViewportShading, job.ShowOverlays ? "1" : "0", job.ViewportOverlaySettingsJson, job.Overwrite ? "1" : "0", job.JobId, job.CoordinationFolder];
                 }
                 else
                 {
@@ -698,7 +699,7 @@ public partial class MainWindow : Window
     private void SetLog(string text) { LogBox.Text = text; EmptyLogText.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed; LogBox.ScrollToEnd(); }
     private void AppendLog(string text) { EmptyLogText.Visibility = Visibility.Collapsed; LogBox.AppendText(text + Environment.NewLine); LogBox.ScrollToEnd(); }
     private static string Tail(string value, int length) => value.Length <= length ? value : value[^length..];
-    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
+    private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, bool show_overlays, Dictionary<string, JsonElement> viewport_overlay_settings, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
     private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null);
@@ -729,6 +730,8 @@ public partial class MainWindow : Window
         public bool RequiresViewport { get; set; }
         public bool UsesCompositorOutput { get; set; }
         public string CompositorOutputNode { get; set; } = "";
+        public bool ShowOverlays { get; set; }
+        public Dictionary<string, JsonElement> ViewportOverlaySettings { get; set; } = [];
         public bool PreRendered { get; set; }
         public string PreviewPath { get; set; } = "";
         public string SenderUser { get; set; } = "Unknown";
@@ -746,6 +749,7 @@ public partial class MainWindow : Window
             TransparentBackground = TransparentBackground, ViewportShading = ViewportShading,
             Distributed = Distributed && !string.IsNullOrWhiteSpace(coordinationFolder), JobId = JobId, CoordinationFolder = coordinationFolder ?? "",
             PreRendered = PreRendered, RequiresViewport = RequiresViewport, UsesCompositorOutput = UsesCompositorOutput, CompositorOutputNode = CompositorOutputNode,
+            ShowOverlays = ShowOverlays, ViewportOverlaySettingsJson = JsonSerializer.Serialize(ViewportOverlaySettings),
             ThumbnailPath = !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath) ? PreviewPath : null
             };
             if (PreRendered)
@@ -791,6 +795,8 @@ public class CameraSetup : NotifyBase
     private bool _placeholders; public bool Placeholders { get => _placeholders; set => SetSetting(ref _placeholders, value); }
     private bool _ignoreCompositor; public bool IgnoreCompositor { get => _ignoreCompositor; set => SetSetting(ref _ignoreCompositor, value); }
     private bool _transparentBackground; public bool TransparentBackground { get => _transparentBackground; set => SetSetting(ref _transparentBackground, value); }
+    private bool _showOverlays; public bool ShowOverlays { get => _showOverlays; set => SetSetting(ref _showOverlays, value); }
+    public string ViewportOverlaySettingsJson { get; set; } = "{}";
 
     private void SetSetting<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
     {
@@ -815,7 +821,8 @@ public class CameraSetup : NotifyBase
         RenderMode = job.RenderMode, Engine = job.Engine, OutputPath = job.OutputPath,
         Width = job.Width, Height = job.Height, Scale = job.Scale, FrameRate = job.FrameRate, Format = job.Format,
         Overwrite = job.Overwrite, Placeholders = job.Placeholders, IgnoreCompositor = job.IgnoreCompositor,
-        TransparentBackground = job.TransparentBackground, UsesCompositorOutput = job.UsesCompositorOutput, CompositorOutputNode = job.CompositorOutputNode
+        TransparentBackground = job.TransparentBackground, UsesCompositorOutput = job.UsesCompositorOutput, CompositorOutputNode = job.CompositorOutputNode,
+        ShowOverlays = job.ShowOverlays, ViewportOverlaySettingsJson = job.ViewportOverlaySettingsJson
     };
 
     public void CopyAllSettingsFrom(CameraSetup source)
@@ -825,6 +832,7 @@ public class CameraSetup : NotifyBase
         Width = source.Width; Height = source.Height; Scale = source.Scale; FrameRate = source.FrameRate; Format = source.Format;
         Overwrite = source.Overwrite; Placeholders = source.Placeholders; IgnoreCompositor = source.IgnoreCompositor; TransparentBackground = source.TransparentBackground;
         UsesCompositorOutput = source.UsesCompositorOutput; CompositorOutputNode = source.CompositorOutputNode;
+        ShowOverlays = source.ShowOverlays; ViewportOverlaySettingsJson = source.ViewportOverlaySettingsJson;
     }
 
     public void CopySettingFrom(CameraSetup source, string propertyName)
@@ -846,6 +854,7 @@ public class CameraSetup : NotifyBase
             case nameof(Placeholders): Placeholders = source.Placeholders; break;
             case nameof(IgnoreCompositor): IgnoreCompositor = source.IgnoreCompositor; break;
             case nameof(TransparentBackground): TransparentBackground = source.TransparentBackground; break;
+            case nameof(ShowOverlays): ShowOverlays = source.ShowOverlays; break;
         }
     }
 }
@@ -857,6 +866,7 @@ public class RenderJob : NotifyBase
     public bool Distributed { get; init; } public string JobId { get; init; } = ""; public string CoordinationFolder { get; init; } = "";
     public bool PreRendered { get; init; } public bool RequiresViewport { get; init; }
     public bool UsesCompositorOutput { get; init; } public string CompositorOutputNode { get; init; } = "";
+    public bool ShowOverlays { get; init; } public string ViewportOverlaySettingsJson { get; init; } = "{}";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
     private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) OnPropertyChanged(nameof(StatusBrush)); } }
     private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
@@ -900,7 +910,7 @@ public class RenderJob : NotifyBase
         Estimate = $"Est. {finish:H:mm} · {duration}";
     }
     public void Finish() { Progress = 100; Estimate = $"Finished {DateTime.Now:H:mm}"; }
-    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading, Distributed = false, UsesCompositorOutput = c.UsesCompositorOutput, CompositorOutputNode = c.CompositorOutputNode };
+    public static RenderJob From(CameraSetup c, string blend) => new() { BlendFile = blend, CameraName = c.CameraName, ThumbnailPath = c.ThumbnailPath, StartFrame = c.StartFrame, EndFrame = c.EndFrame, FrameStep = c.FrameStep, OutputPath = ResolveTokens(c.OutputPath, c.CameraName, blend), RenderMode = c.RenderMode, Engine = c.Engine, Width = c.Width, Height = c.Height, Scale = c.Scale, FrameRate = c.FrameRate, Format = c.Format, Overwrite = c.Overwrite, Placeholders = c.Placeholders, IgnoreCompositor = c.IgnoreCompositor, TransparentBackground = c.TransparentBackground, ViewportShading = c.ViewportShading, Distributed = false, UsesCompositorOutput = c.UsesCompositorOutput, CompositorOutputNode = c.CompositorOutputNode, ShowOverlays = c.ShowOverlays, ViewportOverlaySettingsJson = c.ViewportOverlaySettingsJson };
     private static string ResolveTokens(string template, string cameraName, string blendFile) => template
         .Replace("{camera_name}", Sanitize(cameraName), StringComparison.OrdinalIgnoreCase)
         .Replace("{blend_name}", Sanitize(Path.GetFileNameWithoutExtension(blendFile)), StringComparison.OrdinalIgnoreCase);

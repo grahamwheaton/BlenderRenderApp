@@ -13,7 +13,7 @@ import traceback
 import uuid
 
 args = sys.argv[sys.argv.index("--") + 1:]
-camera_name, start_text, end_text, step_text, output_path, width, height, scale, frame_rate, file_format, viewport_shading, overwrite, job_id, coordination_folder = args
+camera_name, start_text, end_text, step_text, output_path, width, height, scale, frame_rate, file_format, viewport_shading, show_overlays_text, overlay_settings_json, overwrite, job_id, coordination_folder = args
 scene = bpy.context.scene
 camera = bpy.data.objects.get(camera_name)
 if camera is None or camera.type != "CAMERA":
@@ -132,6 +132,17 @@ def mark_complete():
 def run_distributed_capture():
     window, area, region, space = find_viewport()
     space.shading.type = viewport_shading if viewport_shading in {"WIREFRAME", "SOLID", "MATERIAL", "RENDERED"} else "SOLID"
+    try:
+        incoming_overlay_settings = json.loads(overlay_settings_json) if overlay_settings_json else {}
+    except json.JSONDecodeError:
+        incoming_overlay_settings = {}
+    for name, value in incoming_overlay_settings.items():
+        try:
+            setattr(space.overlay, name, value)
+        except (AttributeError, TypeError):
+            pass
+    space.overlay.show_overlays = show_overlays_text == "1"
+    print(f"BRH: Viewport overlays={space.overlay.show_overlays} · synchronized settings={len(incoming_overlay_settings)}", flush=True)
     space.region_3d.view_perspective = "CAMERA"
     reported = set()
     with tempfile.TemporaryDirectory(prefix="blender_render_viewport_") as capture_folder:
