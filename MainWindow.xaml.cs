@@ -950,6 +950,11 @@ public class RenderJob : NotifyBase
     {
         total = Math.Max(1, total);
         completed = Math.Clamp(completed, 0, total);
+        // Blender workers periodically print their own snapshot of the shared
+        // folder. That snapshot can be older than the launcher's NAS poll, so
+        // never allow a delayed worker message to move distributed progress back.
+        if (_completedFrames.HasValue)
+            completed = Math.Max(completed, _completedFrames.Value);
         _completedFrames = completed;
         _totalFrames = total;
         _activeWorkers = activeWorkers;

@@ -81,3 +81,5 @@ Cloud Playblast records the complete viewport-overlay configuration from the 3D 
 ### V5.4.1 distributed progress
 
 Distributed jobs poll the NAS claim folder every two seconds, so progress updates while other machines finish frames rather than only when the local worker finishes. The queue shows the shared completed-frame count, active worker count, and an ETA calculated from the recent combined throughput of all workers.
+
+V5.4.2 prevents delayed progress messages from an individual Blender worker from replacing a newer NAS count, so distributed progress can only move forwards.
