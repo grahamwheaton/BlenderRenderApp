@@ -1,5 +1,43 @@
 # Blender Render Launcher
 
+## V6.2 — compositor-only renders and automatic exports
+
+- Scene **Output can be OFF** when using a compositor File Output node. Compositor output filenames are now resolved by Blender itself, including camera tokens, frame numbers and EXR extensions; multilayer channel names are not appended to the filename.
+- **Make PSD** and **Make MP4** checkboxes beside Watch are saved between sessions (off by default). Enabling them also processes eligible completed jobs currently in the queue. Conversion runs sequentially on this PC; it does not change the render's Complete status if conversion fails.
+- PSD uses RLAYER4 and saves beside the actual compositor EXR. A normal scene multilayer EXR with Combined/Diffuse passes is not interchangeable with the compositor's Image/Diff output. Turn scene Output off and resend jobs created with the wrong source; existing queued job settings do not change retroactively.
+- MP4 uses High/CRF 18 and playback FPS divided by frame step; it saves as `camera_start-end.mp4` beside the sequence. Existing MP4s are never overwritten automatically.
+- NAS export locks prevent simultaneous automatic conversion of a shared job; completion receipts prevent repeating successful exports on other workers/restarts. Errors appear on the job and in Render Log. Manual export buttons remain available for retry or file selection.
+- Keep the launcher open until automatic conversion finishes. Closing is blocked during conversion to allow safe completion.
+- No sender add-on or EXR converter update is required. Workers should use V6.2 to get the compositor filename fix. The PSD converter must be accessible on the converting PC, and MP4 requires FFmpeg.
+
+Portable launcher: `dist/v6.2/Blender Render Launcher v6.2.0.exe`.
+
+## V6.1 — Make PSD
+
+Completed EXR and multilayer EXR jobs show **Make PSD…**. This uses `BlenderBatchEXR-CLI.exe` with `--workflow rlayer4 --format auto --skip-existing`: 8-bit sRGB, COMP/RLAYERS groups and the converter's RLAYERS correction. Image and Diff passes are required; there is no silent fallback to uncorrected HDR output.
+
+Outputs are saved beside each original EXR, automatically switching to PSB when PSD limits require it. Existing PSD/PSB files and source EXRs are preserved. Each file is processed sequentially on this PC, with converter messages shown in the dialog. **Stop after this file** allows the current conversion to finish safely.
+
+The launcher checks beside its EXE, then `W:\Working Graphics\_Plugins\Blender\Blender Batch EXRS` (with its UNC equivalent as fallback). If unavailable, it asks you to locate the CLI. The converter is not bundled.
+
+Reported frame paths and NAS completion records identify this job's EXRs. Tiled jobs use only the final stitched EXR from `complete.json`, never intermediate tiles. If records are unavailable, select the job's EXRs manually; the launcher never converts an entire folder implicitly.
+
+Portable launcher: `dist/v6.1/Blender Render Launcher v6.1.0.exe`. No Blender add-on update required.
+
+## V6.0 — Make MP4
+
+Completed PNG, JPEG and TIFF sequence jobs now show **Make MP4…**. Choose a quality preset (High by default), review playback FPS, and save an H.264 MP4. High uses CRF 18, Medium 23, and Small file 28. Export runs on this PC, not across the render farm.
+
+- Playback defaults to job FPS divided by frame step to preserve timing. You can override it.
+- Original resolution is retained; odd dimensions are padded to even dimensions for H.264 compatibility. MP4 has no alpha or audio.
+- Exact reported frame paths or shared NAS completion records are used. If records are unavailable, select the first numbered image. Missing/empty frames stop export rather than silently shortening it.
+- Progress and cancellation are available. A temporary video is finalized only after successful encoding; cancellation preserves any previous destination MP4 and never changes source images.
+- Install FFmpeg with the libx264 encoder, place `ffmpeg.exe` beside the launcher, or locate it when prompted. FFmpeg is not bundled in the portable EXE.
+- EXR/multilayer EXR sequences are excluded: these require a colour-managed display conversion first. Tiled single-image jobs and existing video outputs do not show this button.
+- The Blender add-on does not need an update for this launcher-only feature.
+
+Portable launcher: `dist/v6.0/Blender Render Launcher v6.0.0.exe`.
+
 A small Windows desktop app for launching Blender animation renders without opening Blender's interface.
 
 ## Use

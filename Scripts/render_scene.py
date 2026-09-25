@@ -79,7 +79,8 @@ if hasattr(camera.data, 'per_camera_resolution'):
         camera_resolution.resolution_x = int(width)
         camera_resolution.resolution_y = int(height)
         camera_resolution.resolution_percentage = int(scale)
-scene.render.image_settings.file_format = file_format
+if not uses_compositor_output:
+    scene.render.image_settings.file_format = file_format
 print(f"BRH: Mode {render_mode} | camera {camera_name} | frames {scene.frame_start}-{scene.frame_end} step {scene.frame_step} | {scene.render.resolution_x}x{scene.render.resolution_y} at {scene.render.resolution_percentage}% | {scene.render.fps / scene.render.fps_base:g} fps | {scene.render.engine} | {scene.render.image_settings.file_format} | overwrite={scene.render.use_overwrite} | placeholders={scene.render.use_placeholder} | compositor={scene.render.use_compositing} | compositor_output={uses_compositor_output} | transparent={scene.render.film_transparent} | output {scene.render.filepath}")
 
 def compositor_frame_path(frame):
@@ -95,19 +96,26 @@ def compositor_frame_path(frame):
         slots = compositor_node.file_slots
         filename = slots[0].path if len(slots) else ''
         item_name = ''
-    def replace_hashes(match):
-        return str(frame).zfill(len(match.group(0)))
-    if '#' in filename:
-        filename = re.sub(r'#+', replace_hashes, filename)
-    else:
-        filename += str(frame).zfill(4)
-    extension = {
-        'BMP': '.bmp', 'IRIS': '.rgb', 'PNG': '.png', 'JPEG': '.jpg',
-        'JPEG2000': '.jp2', 'TARGA': '.tga', 'TARGA_RAW': '.tga',
-        'CINEON': '.cin', 'DPX': '.dpx', 'OPEN_EXR_MULTILAYER': '.exr',
-        'OPEN_EXR': '.exr', 'HDR': '.hdr', 'TIFF': '.tif', 'WEBP': '.webp'
-    }.get(compositor_node.format.file_format, scene.render.file_extension)
-    return os.path.join(directory, filename + item_name + extension)
+    # Multilayer item names are EXR channel names, not filename suffixes.
+    # Use Blender itself for token expansion, frame padding and extension rules.
+    multilayer = compositor_node.format.file_format == 'OPEN_EXR_MULTILAYER'
+    previous_path = scene.render.filepath
+    previous_format = scene.render.image_settings.file_format
+    settings = scene.render.image_settings
+    previous_media = getattr(settings, 'media_type', None)
+    previous_color, previous_depth = settings.color_mode, settings.color_depth
+    try:
+        scene.render.filepath = os.path.join(directory, filename + ('' if multilayer else item_name))
+        if previous_media is not None:
+            settings.media_type = 'MULTI_LAYER_IMAGE' if multilayer else 'IMAGE'
+        settings.file_format = compositor_node.format.file_format
+        return bpy.path.abspath(scene.render.frame_path(frame=frame))
+    finally:
+        scene.render.filepath = previous_path
+        if previous_media is not None:
+            settings.media_type = previous_media
+        settings.file_format = previous_format
+        settings.color_mode, settings.color_depth = previous_color, previous_depth
 
 def report_completed_frame(render_scene):
     rendered_path = compositor_frame_path(render_scene.frame_current) if uses_compositor_output else bpy.path.abspath(render_scene.render.frame_path(frame=render_scene.frame_current))
@@ -275,6 +283,15 @@ def render_distributed():
 try:
     if distributed:
         render_distributed()
+    elif uses_compositor_output:
+        # Scene Output can be disabled, so render_write is not a reliable
+        # completion callback for compositor-only jobs.
+        for frame in range(scene.frame_start, scene.frame_end + 1, scene.frame_step):
+            scene.frame_set(frame)
+            bpy.ops.render.render()
+            if not valid_output(frame):
+                raise RuntimeError(f"Frame {frame} did not produce compositor output: {compositor_frame_path(frame)}")
+            report_completed_frame(scene)
     else:
         bpy.app.handlers.render_write.append(report_completed_frame)
         bpy.ops.render.render(animation=True)

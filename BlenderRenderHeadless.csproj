@@ -6,9 +6,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Blender Render Launcher</AssemblyName>
-    <Version>5.8.0</Version>
-    <FileVersion>5.8.0.0</FileVersion>
-    <AssemblyVersion>5.8.0.0</AssemblyVersion>
+    <Version>6.2.0</Version>
+    <FileVersion>6.2.0.0</FileVersion>
+    <AssemblyVersion>6.2.0.0</AssemblyVersion>
     <ApplicationIcon>Assets\blender-render-icon.ico</ApplicationIcon>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
