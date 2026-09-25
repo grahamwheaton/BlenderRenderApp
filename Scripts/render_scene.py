@@ -209,6 +209,9 @@ def render_distributed():
             print(f'BRH: Could not write accountability report: {error}', flush=True)
 
     while True:
+        if os.environ.get('BRH_CHILD_STOP_FILE') and os.path.exists(os.environ['BRH_CHILD_STOP_FILE']):
+            print('BRH: Child retired between frames.', flush=True)
+            return
         if os.path.exists(cancel_path):
             print('BRH: Distributed job cancelled everywhere.', flush=True)
             return
@@ -237,6 +240,9 @@ def render_distributed():
 
         claimed_any = False
         for frame in frames:
+            if os.environ.get('BRH_CHILD_STOP_FILE') and os.path.exists(os.environ['BRH_CHILD_STOP_FILE']):
+                print('BRH: Child retired between frames.', flush=True)
+                return
             if os.path.exists(cancel_path):
                 print('BRH: Distributed job cancelled everywhere.', flush=True)
                 return
@@ -250,6 +256,10 @@ def render_distributed():
             heartbeat = threading.Thread(target=heartbeat_claim, args=(claim_path, stop_heartbeat), daemon=True)
             heartbeat.start()
             try:
+                # Another worker may have finished between our pre-check and
+                # acquiring the now-released claim. Do not render it twice.
+                if frame_complete(frame):
+                    continue
                 if replace_existing or not valid_output(frame):
                     scene.frame_set(frame)
                     if uses_compositor_output:
@@ -268,6 +278,7 @@ def render_distributed():
                 with open(temporary_done, 'w', encoding='utf-8') as done_file:
                     json.dump({"completed_at": time.time(), "author": worker_author, "machine": socket.gethostname(), "pid": os.getpid(), "output": path}, done_file)
                 os.replace(temporary_done, done_path(frame))
+                print(f"BRH_LOCAL_FRAME_DONE:{frame}", flush=True)
                 reported.add(frame)
                 print(f"BRH_FRAME_DONE:{frame}|{path}|{len(reported)}|{len(frames)}", flush=True)
             finally:

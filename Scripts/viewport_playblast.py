@@ -177,6 +177,9 @@ def run_distributed_capture():
     reported = set()
     with tempfile.TemporaryDirectory(prefix="blender_render_viewport_") as capture_folder:
         while True:
+            if os.environ.get("BRH_CHILD_STOP_FILE") and Path(os.environ["BRH_CHILD_STOP_FILE"]).exists():
+                print("BRH: Child retired between frames.", flush=True)
+                return
             if cancel_path.exists():
                 print("BRH: Distributed job cancelled everywhere.", flush=True)
                 return
@@ -190,6 +193,9 @@ def run_distributed_capture():
                 return
             claimed_any = False
             for frame in frames:
+                if os.environ.get("BRH_CHILD_STOP_FILE") and Path(os.environ["BRH_CHILD_STOP_FILE"]).exists():
+                    print("BRH: Child retired between frames.", flush=True)
+                    return
                 if cancel_path.exists():
                     print("BRH: Distributed job cancelled everywhere.", flush=True)
                     return
@@ -203,6 +209,8 @@ def run_distributed_capture():
                 heartbeat_thread = threading.Thread(target=heartbeat, args=(claim_path, stop_heartbeat), daemon=True)
                 heartbeat_thread.start()
                 try:
+                    if frame_complete(frame):
+                        continue
                     if replace_existing or not valid_output(frame):
                         scene.frame_set(frame)
                         staged_base = Path(capture_folder) / f"frame_{frame}"
@@ -219,6 +227,7 @@ def run_distributed_capture():
                     if not valid_output(frame):
                         raise RuntimeError(f"Frame {frame} did not produce a non-empty output file.")
                     mark_done(frame)
+                    print(f"BRH_LOCAL_FRAME_DONE:{frame}", flush=True)
                     reported.add(frame)
                     print(f"BRH_FRAME_DONE:{frame}|{frame_output(frame)}|{len(reported)}|{len(frames)}", flush=True)
                 finally:

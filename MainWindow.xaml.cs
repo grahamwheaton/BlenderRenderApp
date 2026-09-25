@@ -102,6 +102,7 @@ public partial class MainWindow : Window
         OnlyMyPcCheckBox.IsChecked = savedSettings.OnlyMyPc;
         AutoPsdCheckBox.IsChecked = savedSettings.MakePsd;
         AutoMp4CheckBox.IsChecked = savedSettings.MakeMp4;
+        AllowChildrenCheckBox.IsChecked = savedSettings.AllowChildren;
         _suppressWatchChange = false;
         _watchTimer.Tick += WatchTimer_Tick;
         _progressTimer.Tick += ProgressTimer_Tick;
@@ -112,7 +113,7 @@ public partial class MainWindow : Window
             if (arguments.Any(argument => argument.Equals("--auto-start", StringComparison.OrdinalIgnoreCase))) AutoStartCheckBox.IsChecked = true;
             if (arguments.Any(argument => argument.Equals("--watch", StringComparison.OrdinalIgnoreCase))) WatchModeCheckBox.IsChecked = true;
         };
-        Closed += (_, _) => { _progressTimer.Stop(); StopWatchMode(); };
+        Closed += (_, _) => { _cancelRequested = true; StopRenderWorkers(); _progressTimer.Stop(); StopWatchMode(); };
         Closing += (_, e) =>
         {
             if (_exportSerial.CurrentCount == 0)
@@ -221,7 +222,7 @@ public partial class MainWindow : Window
                 {
                     job.MarkGloballyCancelled();
                     if (ReferenceEquals(job, _activeRenderJob))
-                        try { _renderProcess?.Kill(true); } catch { }
+                        StopRenderWorkers();
                     continue;
                 }
                 var completed = Directory.EnumerateFiles(claimFolder, "*.done").Count();
@@ -360,7 +361,7 @@ public partial class MainWindow : Window
     }
     private void SaveCurrentSettings()
     {
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList(), AutoPsdCheckBox.IsChecked == true, AutoMp4CheckBox.IsChecked == true));
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList(), AutoPsdCheckBox.IsChecked == true, AutoMp4CheckBox.IsChecked == true, AllowChildrenCheckBox.IsChecked == true));
     }
 
     private static string? FindBlender()
@@ -703,7 +704,7 @@ public partial class MainWindow : Window
             File.Move(temporary, cancelPath, true);
             job.MarkGloballyCancelled();
             if (ReferenceEquals(job, _activeRenderJob))
-                try { _renderProcess?.Kill(true); } catch { }
+                StopRenderWorkers();
             AppendLog($"Cancelled distributed job everywhere: {job.CameraName} · requested by {cancelledBy}");
             StatusText.Text = $"Cancelled everywhere · {job.CameraName}";
             UpdateQueueState();
@@ -737,7 +738,7 @@ public partial class MainWindow : Window
 
     private async void RenderQueueButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_queueRunning) { _cancelRequested = true; try { _renderProcess?.Kill(true); } catch { } return; }
+        if (_queueRunning) { _cancelRequested = true; StopRenderWorkers(); return; }
         if (_blenderExe is null) return;
         _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed;
         _queueRunning = true; _cancelRequested = false; SetUiRunning(true); SetLog("Starting render queue…");
@@ -768,7 +769,12 @@ public partial class MainWindow : Window
                     script = ExtractScript("render_scene.py");
                     args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder, job.UsesCompositorOutput ? "1" : "0", job.CompositorOutputNode];
                 }
-                var code = await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
+                var useChildren = AllowChildrenCheckBox.IsChecked == true && ChildWorkerPolicy.Eligible(job);
+                if (AllowChildrenCheckBox.IsChecked == true && !useChildren)
+                    job.WorkerStatus = "1 Blender · children require a shared playblast of 24+ frames";
+                var code = useChildren
+                    ? await RunWithChildrenAsync(_blenderExe, args, job)
+                    : await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
                 if (job.HasGlobalCancellationMarker()) job.MarkGloballyCancelled();
                 job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : code == 0 ? "Complete" : "Failed";
                 if (code == 0 && !_cancelRequested && !job.IsGloballyCancelled) job.Finish();
@@ -785,6 +791,7 @@ public partial class MainWindow : Window
 
     private void SetUiRunning(bool running)
     {
+        AllowChildrenCheckBox.IsEnabled = !running;
         DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = ClearQueueButton.IsEnabled = ClearCompletedButton.IsEnabled = !running;
         foreach (var job in _queue) job.CanRemove = !running;
         RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs";
@@ -846,7 +853,7 @@ public partial class MainWindow : Window
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, bool show_overlays, Dictionary<string, JsonElement> viewport_overlay_settings, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
-    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null, bool MakePsd = false, bool MakeMp4 = false);
+    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null, bool MakePsd = false, bool MakeMp4 = false, bool AllowChildren = false);
 
     private sealed class IncomingRenderJob
     {
@@ -1009,6 +1016,8 @@ public class CameraSetup : NotifyBase
 public class RenderJob : NotifyBase
 {
     public string LocalExportId { get; } = Guid.NewGuid().ToString("N");
+    private string _workerStatus = "";
+    public string WorkerStatus { get => _workerStatus; set => Set(ref _workerStatus, value); }
     private string _exportStatus = "";
     public string ExportStatus { get => _exportStatus; set => Set(ref _exportStatus, value); }
     public int TileSize { get; init; }

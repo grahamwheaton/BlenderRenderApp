@@ -1,5 +1,19 @@
 # Blender Render Launcher
 
+## V6.3 experimental — Allow Children
+
+The saved **Allow Children** checkbox is off by default. It can trial **one extra local Blender process** (two total) for distributed image-sequence playblasts with at least 24 frames. Both use the original job's settings and NAS frame claims. Normal final renders, tiled images, video outputs and uncoordinated local jobs are deliberately excluded from this first version.
+
+The launcher waits for real local frame timings and three healthy resource samples. A trial requires CPU below 60%, GPU below 65%, at least 8 GB free RAM (and twice the primary's private memory), and at least 4 GB free VRAM (and enough to match current GPU memory use). NVIDIA `nvidia-smi` telemetry must be available; unknown GPU capacity means no child. It also requires at least 12 remaining frames and an estimated minute of work left.
+
+After the child produces frames, aggregate local throughput is compared against the single-worker baseline over at least 60 seconds. Less than 10% gain retires the child between frames; low RAM/VRAM or unavailable telemetry also retires it. Each job gets at most one trial. These are conservative heuristics, not a guarantee of acceleration, especially when scene complexity changes between frames. Queue cards show the decision/status.
+
+Cancelling locally or globally stops both owned workers. Closing the launcher stops owned render workers as well. A child failure does not terminate the primary: stale NAS claims can be reclaimed by the existing worker protocol. Graceful retirement finishes the current frame, releases its claim and exits before taking another. The new worker scripts recheck frame completion after acquiring a claim to avoid rendering a frame another worker just finished.
+
+Portable build: `dist/v6.3-experimental/Blender Render Launcher v6.3.0.exe`. No sender add-on update required. Try a longer cloud playblast with the option off, then on, to compare total elapsed time on your hardware.
+
+Regression tests: `dotnet run --project Tests/ChildWorkers/ChildWorkers.csproj -c Release` tests two background Workbench workers; add `-- --viewport` for true viewport workers. Tests create small temporary fixtures, verify every frame is owned exactly once, and check both idle and active child retirement. Set `BLENDER_EXE` if Blender is not installed at the default Blender 5.2 path. These validate safety/coordination, not an end-to-end speed improvement on production scenes.
+
 ## V6.2 — compositor-only renders and automatic exports
 
 - Scene **Output can be OFF** when using a compositor File Output node. Compositor output filenames are now resolved by Blender itself, including camera tokens, frame numbers and EXR extensions; multilayer channel names are not appended to the filename.
