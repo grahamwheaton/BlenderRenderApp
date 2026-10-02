@@ -33,15 +33,57 @@ public partial class MainWindow
         try { _attemptLog?.Dispose(); } catch { }
         _attemptLog = null;
     }
-    private void ViewJobLog_Click(object sender, RoutedEventArgs e)
+    internal static string BuildCompletionReport(RenderJob job)
+    {
+        var report = new System.Text.StringBuilder();
+        report.AppendLine("JOB COMPLETION REPORT — not a Blender console log");
+        report.AppendLine("No local worker log is available. The job may have been rendered by another PC.");
+        report.AppendLine($"Report generated: {DateTimeOffset.Now:O}");
+        report.AppendLine($"Job: {job.JobId}\nFile: {job.BlendFile}\nCamera: {job.CameraName}\nStatus: {job.Status}\n{job.FrameSummary}\nOutput: {job.OutputPath}");
+        report.AppendLine(job.FailureDetail);
+        report.AppendLine(job.WorkerStatus);
+        report.AppendLine(job.ExportStatus);
+        if (job.Distributed && !string.IsNullOrWhiteSpace(job.CoordinationFolder))
+        {
+            var folder = Path.Combine(job.CoordinationFolder, "_claims", SafeJobId(job.JobId));
+            report.AppendLine("Shared completion records: " + folder);
+            try
+            {
+                if (!Directory.Exists(folder)) report.AppendLine("Shared records are unavailable or have been removed.");
+                else
+                {
+                    var count = 0;
+                    foreach (var file in Directory.EnumerateFiles(folder, "*.done").OrderBy(p => p))
+                    {
+                        report.AppendLine(Path.GetFileName(file) + ": " + File.ReadAllText(file));
+                        count++;
+                    }
+                    report.AppendLine($"{count} frame completion records found.");
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { report.AppendLine("Could not read shared records: " + ex.Message); }
+        }
+        return report.ToString();
+    }
+
+    private async void ViewJobLog_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
         if (sender is not FrameworkElement { Tag: RenderJob job }) return;
         try
         {
-            if (!File.Exists(job.LogPath)) throw new IOException("No saved log is available. Logs are recorded for new attempts in this version.");
+            var path = job.LogPath;
+            if (!File.Exists(path))
+            {
+                if (job.Status != "Complete") throw new IOException("No saved log is available. Logs are recorded for new attempts in this version.");
+                var report = await Task.Run(() => BuildCompletionReport(job));
+                var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BlenderRenderLauncher", "logs");
+                Directory.CreateDirectory(folder);
+                path = Path.Combine(folder, "completion-" + Guid.NewGuid().ToString("N") + ".log");
+                await File.WriteAllTextAsync(path, report);
+            }
             var info = new ProcessStartInfo("notepad.exe") { UseShellExecute = false };
-            info.ArgumentList.Add(job.LogPath); Process.Start(info);
+            info.ArgumentList.Add(path); Process.Start(info);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Render log"); }
     }

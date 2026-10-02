@@ -8,7 +8,7 @@ SOURCE = Path(__file__).resolve().parents[1] / "BlenderAddon" / "render_queue_se
 
 
 class SaveTests(unittest.TestCase):
-    def helper(self, dirty, outcomes, enabled=True):
+    def helper(self, dirty, outcomes, enabled=True, stays_dirty=False):
         data = SimpleNamespace(is_dirty=dirty)
         calls, sleeps = [], []
         def save():
@@ -16,7 +16,7 @@ class SaveTests(unittest.TestCase):
             result = outcomes.pop(0)
             if isinstance(result, Exception):
                 raise result
-            if result == {"FINISHED"}:
+            if result == {"FINISHED"} and not stays_dirty:
                 data.is_dirty = False
             return result
         env = dict(bpy=SimpleNamespace(data=data, ops=SimpleNamespace(wm=SimpleNamespace(save_mainfile=save))),
@@ -47,6 +47,17 @@ class SaveTests(unittest.TestCase):
         fn, calls, _ = self.helper(True, [{"CANCELLED"}])
         with self.assertRaisesRegex(RuntimeError, "Job NOT sent"): fn()
         self.assertEqual(len(calls), 1)
+
+    def test_finished_but_dirty_has_specific_diagnostic(self):
+        fn, calls, _ = self.helper(True, [{"FINISHED"}], stays_dirty=True)
+        with self.assertRaisesRegex(RuntimeError, "FINISHED, but Blender still reports unsaved changes"):
+            fn()
+        self.assertEqual(len(calls), 1)
+
+    def test_cancelled_has_operator_diagnostic(self):
+        fn, _, _ = self.helper(True, [{"CANCELLED"}])
+        with self.assertRaisesRegex(RuntimeError, "Save operator did not finish.*CANCELLED"):
+            fn()
 
 
 if __name__ == "__main__": unittest.main()

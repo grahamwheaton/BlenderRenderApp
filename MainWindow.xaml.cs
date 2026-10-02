@@ -64,6 +64,7 @@ public partial class MainWindow : Window
     private Process? _renderProcess;
     private RenderJob? _activeRenderJob;
     private bool _queueRunning;
+    private bool _loadingBlend;
     private bool _cancelRequested;
     private bool _syncingCameraSettings;
     private CameraSetup? _selectedCamera;
@@ -89,7 +90,13 @@ public partial class MainWindow : Window
         InitializeComponent();
         CameraItems.ItemsSource = _cameras;
         QueueItems.ItemsSource = _queue;
-        QueueItems.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(QueueItems_Click));
+        CameraSettingsContent.IsEnabled = false;
+        _queue.CollectionChanged += (_, e) =>
+        {
+            if (e.OldItems != null) foreach (RenderJob job in e.OldItems) job.PropertyChanged -= QueueJobChanged;
+            if (e.NewItems != null) foreach (RenderJob job in e.NewItems) job.PropertyChanged += QueueJobChanged;
+            RefreshActiveRender();
+        };
         _blenderExe = FindBlender();
         var savedSettings = LoadAppSettings();
         _workerTuning = savedSettings.WorkerTuning is { } tuning && tuning.Validate() == null ? tuning : new();
@@ -105,6 +112,7 @@ public partial class MainWindow : Window
         AutoPsdCheckBox.IsChecked = savedSettings.MakePsd;
         AutoMp4CheckBox.IsChecked = savedSettings.MakeMp4;
         AllowChildrenCheckBox.IsChecked = savedSettings.AllowChildren;
+        AllowPreloadCheckBox.IsChecked = savedSettings.AllowPreload;
         AutoRetryCheckBox.IsChecked = savedSettings.AutoRetry;
         ForceOverwriteCheckBox.IsChecked = savedSettings.ForceOverwrite;
         _suppressWatchChange = false;
@@ -212,6 +220,8 @@ public partial class MainWindow : Window
 
     private void ProgressTimer_Tick(object? sender, EventArgs e)
     {
+        RefreshActiveRender();
+        RefreshSharedPreviews(); PollPreload();
         foreach (var completedJob in _queue.Where(j => j.Status == "Complete").ToList())
         {
             if (AutoPsdCheckBox.IsChecked == true && completedJob.PsdVisibility == Visibility.Visible) StartAutomaticExport(completedJob, "PSD");
@@ -312,6 +322,7 @@ public partial class MainWindow : Window
         }
         _receivedJobIds.Add(incoming.JobId);
         var job = incoming.ToRenderJob(coordinationFolder);
+        job.CloudManifestPath = cloudJobFile ?? "";
         _queue.Add(job); UpdateQueueState();
         if (job.Status == "Waiting") ResetAutoStartCountdown();
         StatusText.Text = incoming.PreRendered ? $"{source} viewport playblast received · {job.CameraName}" : $"{source} job received · {job.CameraName}";
@@ -393,7 +404,7 @@ public partial class MainWindow : Window
     }
     private void SaveCurrentSettings()
     {
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList(), AutoPsdCheckBox.IsChecked == true, AutoMp4CheckBox.IsChecked == true, AllowChildrenCheckBox.IsChecked == true, _workerTuning, AutoRetryCheckBox.IsChecked == true, ForceOverwriteCheckBox.IsChecked == true));
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList(), AutoPsdCheckBox.IsChecked == true, AutoMp4CheckBox.IsChecked == true, AllowChildrenCheckBox.IsChecked == true, _workerTuning, AutoRetryCheckBox.IsChecked == true, ForceOverwriteCheckBox.IsChecked == true, AllowPreloadCheckBox.IsChecked == true));
     }
 
     private static string? FindBlender()
@@ -466,11 +477,14 @@ public partial class MainWindow : Window
 
     private async Task LoadBlendAsync(string path)
     {
-        if (_queueRunning) return;
+        if (_queueRunning || _loadingBlend) return;
+        AutoStartCheckBox.IsChecked = false;
+        _autoStartAt = null;
         _blendFile = path;
         DropTitleText.Text = Path.GetFileName(path); DropSubtitleText.Text = path; DropSubtitleText.ToolTip = path;
         _cameras.Clear(); AddQueueButton.IsEnabled = false; CameraCountText.Text = "Inspecting…";
         if (_blenderExe is null) { StatusText.Text = "Choose blender.exe to inspect this file"; return; }
+        _loadingBlend = true;
         StatusText.Text = "Reading cameras and generating previews…"; SetLog("Inspecting the Blender file and rendering camera thumbnails…");
         try
         {
@@ -510,10 +524,14 @@ public partial class MainWindow : Window
             SetFocusedCamera(_cameras.FirstOrDefault(camera => camera.IsActive) ?? _cameras.FirstOrDefault());
             UpdateCameraSelectionCount();
             AddQueueButton.IsEnabled = ContactSheetButton.IsEnabled = scene.cameras.Count > 0;
-            StatusText.Text = scene.cameras.Count > 0 ? "Choose cameras and settings, then add them to the queue" : "No cameras found";
+            foreach (var camera in _cameras) _queue.Add(RenderJob.From(camera, path));
+            UpdateQueueState();
+            QueueItems.SelectedItem = _queue.LastOrDefault();
+            StatusText.Text = scene.cameras.Count > 0 ? $"Added {scene.cameras.Count} cameras · Auto start switched off" : "No cameras found";
             SetLog(scene.cameras.Count > 0 ? $"Scene ready · {scene.render_engine} · {scene.resolution_x}×{scene.resolution_y} · {scene.file_format}{(scene.uses_compositor_output ? $" · output from compositor node {scene.compositor_output_node}" : "")}" : "This file has no camera objects.");
         }
         catch (Exception ex) { CameraCountText.Text = "Inspection failed"; StatusText.Text = "Could not inspect file"; SetLog(ex.Message); }
+        finally { _loadingBlend = false; }
     }
 
     private static string CameraOutputPath(string savedPath, string camera)
@@ -567,6 +585,13 @@ public partial class MainWindow : Window
 
     private void FrameRangeMode_Changed(object sender, RoutedEventArgs e)
     {
+        if (_reviewJob != null)
+        {
+            if (_selectedCamera is not { } draft || !CameraSettingsContent.IsEnabled) return;
+            draft.StartFrame = (KeyframeRangeCheckBox.IsChecked == true ? draft.KeyframeStart ?? draft.DefaultStartFrame : draft.DefaultStartFrame).ToString(CultureInfo.InvariantCulture);
+            draft.EndFrame = (KeyframeRangeCheckBox.IsChecked == true ? draft.KeyframeEnd ?? draft.DefaultEndFrame : draft.DefaultEndFrame).ToString(CultureInfo.InvariantCulture);
+            return;
+        }
         ApplyFrameRangeMode();
     }
 
@@ -584,9 +609,7 @@ public partial class MainWindow : Window
     {
         if ((sender as FrameworkElement)?.Tag is CameraSetup camera)
         {
-            CameraSettingsContent.IsHitTestVisible = true;
-            QueueReviewBadge.Visibility = Visibility.Collapsed;
-            SetFocusedCamera(camera);
+            OpenCameraDraft(camera);
             e.Handled = true;
         }
     }
@@ -632,7 +655,7 @@ public partial class MainWindow : Window
         if ((sender as Button)?.Tag is not CameraSetup camera) return;
         _copiedCameraSettings = new CameraSetup();
         _copiedCameraSettings.CopyAllSettingsFrom(camera);
-        SetFocusedCamera(camera);
+        OpenCameraDraft(camera);
         StatusText.Text = $"Copied settings from {camera.CameraName}";
         e.Handled = true;
     }
@@ -644,7 +667,7 @@ public partial class MainWindow : Window
         _syncingCameraSettings = true;
         try { camera.CopyAllSettingsFrom(_copiedCameraSettings); }
         finally { _syncingCameraSettings = false; }
-        SetFocusedCamera(camera);
+        OpenCameraDraft(camera);
         StatusText.Text = $"Pasted settings to {camera.CameraName}";
         e.Handled = true;
     }
@@ -766,7 +789,7 @@ public partial class MainWindow : Window
     private void ClearCompletedButton_Click(object sender, RoutedEventArgs e) { foreach (var job in _queue.Where(j => j.Status is "Complete" or "Failed" or "Cancelled").ToList()) { RememberDismissedJob(job); _queue.Remove(job); } SaveCurrentSettings(); UpdateQueueState(); }
     private void ClearQueueButton_Click(object sender, RoutedEventArgs e) { if (_queueRunning) return; foreach (var job in _queue) RememberDismissedJob(job); _queue.Clear(); SaveCurrentSettings(); UpdateQueueState(); StatusText.Text = "Render queue cleared permanently"; }
     private void RememberDismissedJob(RenderJob job) { if (!string.IsNullOrWhiteSpace(job.JobId)) _dismissedJobIds.Add(job.JobId); }
-    private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; QueueCountText.Text = $"{_queue.Count} job{(_queue.Count == 1 ? "" : "s")}"; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting") || _queueRunning; RenderQueueButton.Content = _queueRunning ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs"; }
+    private void UpdateQueueState() { EmptyQueueText.Visibility = _queue.Count == 0 ? Visibility.Visible : Visibility.Collapsed; QueueCountText.Text = $"{_queue.Count} job{(_queue.Count == 1 ? "" : "s")}"; RenderQueueButton.IsEnabled = _queue.Any(j => j.Status == "Waiting" && !j.IsIgnored) || _queueRunning; RenderQueueButton.Content = _queueRunning ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting" && !j.IsIgnored)} jobs"; }
 
     private async void RenderQueueButton_Click(object sender, RoutedEventArgs e)
     {
@@ -775,19 +798,24 @@ public partial class MainWindow : Window
         if (_blenderExe is null) return;
         _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed;
         _queueRunning = true; _cancelRequested = false; SetUiRunning(true); SetLog("Starting render queue…");
-        foreach (var job in _queue.Where(j => j.Status == "Waiting").ToList())
+        var onlyJob = _singleRenderJob; _singleRenderJob = null; _renderOnlyOne = onlyJob != null;
+        _attemptedThisRun.Clear();
+        var attempted = _attemptedThisRun;
+        while (_queue.FirstOrDefault(j => j.Status == "Waiting" && !attempted.Contains(j) && !j.IsIgnored && (onlyJob == null || ReferenceEquals(j, onlyJob))) is { } job)
         {
             if (job.Status != "Waiting") continue;
             if (_cancelRequested) { job.Status = "Cancelled"; break; }
             if (!string.IsNullOrEmpty(job.BatchId))
             {
-                var batch = _queue.Where(j => j.Status == "Waiting" && j.BatchId == job.BatchId && j.BlendFile == job.BlendFile && j.CoordinationFolder == job.CoordinationFolder).ToList();
+                var batch = _queue.Where(j => j.Status == "Waiting" && !attempted.Contains(j) && !j.IsIgnored && (onlyJob == null || ReferenceEquals(j, onlyJob))).TakeWhile(j => j.BatchId == job.BatchId && j.BlendFile == job.BlendFile && j.CoordinationFolder == job.CoordinationFolder).ToList();
+                foreach (var item in batch) attempted.Add(item);
                 await RunCameraBatchWithRetries(batch);
                 continue;
             }
+            attempted.Add(job);
             for (var retries = 0; ; retries++)
             {
-            job.Begin(); _activeRenderJob = job; StatusText.Text = $"Rendering {job.CameraName} · {job.FrameSummary}";
+            job.Begin(); job.IsOpening = true; RefreshActiveRender(); _activeRenderJob = job; StatusText.Text = $"Opening {job.BlendFileName} · {job.CameraName}";
             BeginAttemptLog(job);
             var overwrite = job.Overwrite || ForceOverwriteCheckBox.IsChecked == true;
             WriteAttemptLog($"Force overwrite: {ForceOverwriteCheckBox.IsChecked == true}; effective overwrite: {overwrite}");
@@ -823,7 +851,7 @@ public partial class MainWindow : Window
                     : await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
                 AppendLog($"Blender exit code: {code} (0x{unchecked((uint)code):X8})");
                 if (job.HasGlobalCancellationMarker()) job.MarkGloballyCancelled();
-                job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : code == 0 ? "Complete" : "Failed";
+                job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : code == 75 ? "Waiting" : code == 0 ? "Complete" : "Failed";
                 if (job.Status == "Failed") job.FailureDetail = $"Blender exited with code {code}. Open View log for details.";
                 if (code == 0 && !_cancelRequested && !job.IsGloballyCancelled) job.Finish();
             }
@@ -832,10 +860,11 @@ public partial class MainWindow : Window
             if (!await WaitForAutomaticRetry(job, retries)) break;
             }
         }
+        StopPreload(); _renderOnlyOne = false;
         _queueRunning = false; _activeRenderJob = null; _renderProcess = null; SetUiRunning(false); UpdateQueueState();
         StatusText.Text = _cancelRequested ? "Queue cancelled" : _queue.Any(j => j.Status == "Failed") ? "Queue finished with errors" : "Queue finished";
         AppendLog(_cancelRequested ? "\nQueue cancelled." : "\nQueue complete.");
-        if (!_cancelRequested && WatchModeCheckBox.IsChecked == true && AutoStartCheckBox.IsChecked == true && _queue.Any(j => j.Status == "Waiting"))
+        if (!_cancelRequested && WatchModeCheckBox.IsChecked == true && AutoStartCheckBox.IsChecked == true && _queue.Any(j => j.Status == "Waiting" && !j.IsIgnored))
             ResetAutoStartCountdown();
     }
 
@@ -845,7 +874,7 @@ public partial class MainWindow : Window
         ForceOverwriteCheckBox.IsEnabled = !running;
         DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = ClearQueueButton.IsEnabled = ClearCompletedButton.IsEnabled = !running;
         foreach (var job in _queue) job.CanRemove = !running;
-        RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs";
+        RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting" && !j.IsIgnored)} jobs";
     }
 
     private static ProcessStartInfo MakeStartInfo(string exe, IEnumerable<string> args, bool hiddenWindow = false) { var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, WindowStyle = hiddenWindow ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal }; foreach (var arg in args) psi.ArgumentList.Add(arg); return psi; }
@@ -858,13 +887,14 @@ public partial class MainWindow : Window
     }
     private async Task<int> RunStreamingAsync(string exe, IEnumerable<string> args, RenderJob job, bool hiddenWindow = false)
     {
-        _renderProcess = new Process { StartInfo = MakeStartInfo(exe, args, hiddenWindow), EnableRaisingEvents = true };
+        _renderProcess = PrepareWorker(exe, args, hiddenWindow);
         _renderProcess.OutputDataReceived += (_, e) =>
         {
             if (string.IsNullOrWhiteSpace(e.Data)) return;
             Dispatcher.Invoke(() =>
             {
                 AppendLog(e.Data);
+                WorkerReady(job, e.Data);
                 var match = FramePattern.Match(e.Data);
                 if (match.Success && int.TryParse(match.Groups[1].Value, out var frame))
                 {
@@ -876,7 +906,7 @@ public partial class MainWindow : Window
         };
         _renderProcess.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Dispatcher.Invoke(() => AppendLog(e.Data)); };
         var process = _renderProcess;
-        process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine();
+        StartPreparedWorker(process);
         var exited = process.WaitForExitAsync();
         while (await Task.WhenAny(exited, Task.Delay(2000)) != exited)
         {
@@ -904,7 +934,7 @@ public partial class MainWindow : Window
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, bool show_overlays, Dictionary<string, JsonElement> viewport_overlay_settings, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
-    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null, bool MakePsd = false, bool MakeMp4 = false, bool AllowChildren = false, WorkerTuning? WorkerTuning = null, bool AutoRetry = true, bool ForceOverwrite = false);
+    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null, bool MakePsd = false, bool MakeMp4 = false, bool AllowChildren = false, WorkerTuning? WorkerTuning = null, bool AutoRetry = true, bool ForceOverwrite = false, bool AllowPreload = false);
 
     private sealed class IncomingRenderJob
     {
@@ -1068,6 +1098,33 @@ public class CameraSetup : NotifyBase
 
 public class RenderJob : NotifyBase
 {
+    public string CloudManifestPath { get; set; } = "";
+    private bool _previewBusy;
+    public bool PreviewBusy { get => _previewBusy; set { if (Set(ref _previewBusy, value)) { OnPropertyChanged(nameof(CanGeneratePreview)); OnPropertyChanged(nameof(PreviewButtonText)); } } }
+    public bool CanGeneratePreview => !PreviewBusy;
+    public string PreviewButtonText => PreviewBusy ? "Generating…" : "Generate preview";
+    private bool _actionsExpanded;
+    public bool ActionsExpanded { get => _actionsExpanded; set => Set(ref _actionsExpanded, value); }
+    public Visibility RestartVisibility => Status == "Cancelled" ? Visibility.Visible : Visibility.Collapsed;
+    private bool _isOpening;
+    public bool IsOpening { get => _isOpening; set { if (Set(ref _isOpening, value)) { OnPropertyChanged(nameof(StatusDisplay)); OnPropertyChanged(nameof(StatusIcon)); OnPropertyChanged(nameof(CanReorder)); } } }
+    private bool _isBatchReserved;
+    public bool IsBatchReserved { get => _isBatchReserved; set { if (Set(ref _isBatchReserved, value)) OnPropertyChanged(nameof(CanReorder)); } }
+    public bool CanReorder => Status == "Waiting" && !IsIgnored && !IsOpening && !IsBatchReserved;
+    private bool _isIgnored;
+    public bool IsIgnored { get => _isIgnored; set { if (Set(ref _isIgnored, value)) { OnPropertyChanged(nameof(RowOpacity)); OnPropertyChanged(nameof(IgnoreLabel)); OnPropertyChanged(nameof(CanReorder)); } } }
+    public Visibility RenderRowVisibility => Status == "Complete" ? Visibility.Collapsed : Visibility.Visible;
+    public bool CanRenderRow => CanRemove && Status == "Waiting";
+    public double RowOpacity => IsIgnored ? 0.4 : 1;
+    public string IgnoreLabel => IsIgnored ? "Unignore" : "Ignore";
+    public string ShortOutputPath => OutputPath.Length > 38 ? "…" + OutputPath[^37..] : OutputPath;
+    private bool _isNext;
+    public bool IsNext { get => _isNext; set { if (Set(ref _isNext, value)) OnPropertyChanged(nameof(NextVisibility)); } }
+    public Visibility NextVisibility => IsNext && Status == "Waiting" && !IsOpening ? Visibility.Visible : Visibility.Collapsed;
+    public string StatusIcon => IsOpening && Status is "Waiting" or "Rendering" ? "\uE8E5" : Status switch { "Rendering" => "\uE768", "Complete" => "\uE73E", "Failed" => "\uE783", "Cancelled" => "\uE711", "Waiting" => "\uE823", _ => "\uE895" };
+    public string BlendFileName => Path.GetFileName(BlendFile);
+    public string ResolutionLabel => $"{Width}x{Height}({Scale}%)";
+    public string RenderEngineLabel => RequiresViewport ? $"Viewport · {ViewportShadingLabel}" : Engine switch { "KEEP" => "Saved setting", "CYCLES" => "Cycles", "BLENDER_EEVEE" or "BLENDER_EEVEE_NEXT" => "EEVEE", "BLENDER_WORKBENCH" => "Workbench", _ => Engine };
     public string BatchId { get; init; } = "";
     public string LocalExportId { get; } = Guid.NewGuid().ToString("N");
     private string _workerStatus = "";
@@ -1083,15 +1140,17 @@ public class RenderJob : NotifyBase
     public bool UsesCompositorOutput { get; init; } public string CompositorOutputNode { get; init; } = "";
     public bool ShowOverlays { get; init; } public string ViewportOverlaySettingsJson { get; init; } = "{}";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
-private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) { OnPropertyChanged(nameof(StatusBrush)); OnPropertyChanged(nameof(StatusDisplay)); OnPropertyChanged(nameof(GlobalCancelVisibility)); OnPropertyChanged(nameof(Mp4Visibility)); OnPropertyChanged(nameof(PsdVisibility)); OnPropertyChanged(nameof(RepairVisibility)); OnPropertyChanged(nameof(RetryVisibility)); } } }
+private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) { if (value == "Complete") ActionsExpanded = true; OnPropertyChanged(nameof(LogVisibility)); OnPropertyChanged(nameof(RenderRowVisibility)); OnPropertyChanged(nameof(CanRenderRow)); OnPropertyChanged(nameof(RestartVisibility)); if (value != "Rendering" && value != "Waiting") IsOpening = false; OnPropertyChanged(nameof(StatusIcon)); OnPropertyChanged(nameof(CanReorder)); OnPropertyChanged(nameof(NextVisibility)); OnPropertyChanged(nameof(StatusBrush)); OnPropertyChanged(nameof(StatusDisplay)); OnPropertyChanged(nameof(GlobalCancelVisibility)); OnPropertyChanged(nameof(Mp4Visibility)); OnPropertyChanged(nameof(PsdVisibility)); OnPropertyChanged(nameof(RepairVisibility)); OnPropertyChanged(nameof(RetryVisibility)); } } }
     private string _claimedBy = "";
     public string ClaimedBy { get => _claimedBy; set { if (Set(ref _claimedBy, value)) OnPropertyChanged(nameof(StatusDisplay)); } }
-    public string StatusDisplay => !string.IsNullOrEmpty(ClaimedBy) && Status is "Waiting" or "Rendering" ? "Job claimed by " + ClaimedBy : Status;
+    private string _preloadLabel = "";
+    public string PreloadLabel { get => _preloadLabel; set { if (Set(ref _preloadLabel, value)) OnPropertyChanged(nameof(StatusDisplay)); } }
+    public string StatusDisplay => !string.IsNullOrEmpty(PreloadLabel) ? PreloadLabel : IsOpening && Status is "Waiting" or "Rendering" ? "Opening…" : !string.IsNullOrEmpty(ClaimedBy) && Status is "Waiting" or "Rendering" ? "Job claimed by " + ClaimedBy : Status;
     private string _logPath = "";
     public string LogPath { get => _logPath; set { if (Set(ref _logPath, value)) OnPropertyChanged(nameof(LogVisibility)); } }
     private string _failureDetail = "";
     public string FailureDetail { get => _failureDetail; set => Set(ref _failureDetail, value); }
-    public Visibility LogVisibility => string.IsNullOrEmpty(LogPath) ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility LogVisibility => Status == "Complete" || !string.IsNullOrEmpty(LogPath) ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RetryVisibility => Status == "Failed" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RepairVisibility => Status == "Complete" && Distributed && TileSize == 0 && TotalFrameCount > 1 && Format != "FFMPEG" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility PsdVisibility => Status == "Complete" && (TileSize > 0 || Format is "OPEN_EXR" or "OPEN_EXR_MULTILAYER") ? Visibility.Visible : Visibility.Collapsed;
@@ -1125,7 +1184,7 @@ private string _status = "Waiting"; public string Status { get => _status; set {
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or ArgumentException) { return false; }
     }
     public Visibility GlobalCancelVisibility => Distributed && (Status is "Waiting" or "Rendering") ? Visibility.Visible : Visibility.Collapsed;
-    private bool _canRemove = true; public bool CanRemove { get => _canRemove; set => Set(ref _canRemove, value); }
+    private bool _canRemove = true; public bool CanRemove { get => _canRemove; set { if (Set(ref _canRemove, value)) OnPropertyChanged(nameof(CanRenderRow)); } }
     private double _progress; public double Progress { get => _progress; private set { if (Set(ref _progress, value)) OnPropertyChanged(nameof(ProgressLabel)); } }
     private string _estimate = "Waiting"; public string Estimate { get => _estimate; private set => Set(ref _estimate, value); }
     private DateTime _startedAt; private DateTime _lastThumbnailUpdate; private int _lastReportedFrame = int.MinValue; private int? _currentFrame; private int? _completedFrames; private int? _totalFrames; private int _activeWorkers;
@@ -1155,6 +1214,7 @@ private string _status = "Waiting"; public string Status { get => _status; set {
     public void Begin() { _startedAt = DateTime.Now; _lastThumbnailUpdate = DateTime.MinValue; _lastReportedFrame = int.MinValue; _currentFrame = null; _completedFrames = null; _totalFrames = null; _activeWorkers = 0; _sharedProgressSamples.Clear(); Progress = 0; OnPropertyChanged(nameof(ProgressLabel)); Estimate = "Estimating…"; Status = "Rendering"; }
     public void ReportFrame(int frame, string? renderedPath, int? sharedCompleted = null, int? sharedTotal = null)
     {
+        IsOpening = false;
         if (!string.IsNullOrWhiteSpace(renderedPath)) RenderedFiles[frame] = renderedPath;
         if (Status == "Complete") return;
         if (!int.TryParse(StartFrame, out var start) || !int.TryParse(EndFrame, out var end)) return;

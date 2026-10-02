@@ -53,7 +53,7 @@ public partial class MainWindow
                 Record(job, $"Camera batch {job.BatchId}; Machine {Environment.MachineName}; Blender {_blenderExe}; File {job.BlendFile}");
             }
             var byId = jobs.ToDictionary(j => j.JobId);
-            process = new Process { StartInfo = MakeStartInfo(_blenderExe!, new[] { "--background", primary.BlendFile, "--python", script, "--", packetPath }) };
+            process = PrepareWorker(_blenderExe!, new[] { "--background", primary.BlendFile, "--python", script, "--", packetPath });
             _renderProcess = process;
             void Handle(string? line)
             {
@@ -61,6 +61,7 @@ public partial class MainWindow
                 Dispatcher.Invoke(() =>
                 {
                     const string statusPrefix = "BRH_BATCH_STATUS:", logPrefix = "BRH_BATCH_LOG:";
+                    if (line == "BRH_SCENE_READY") { foreach (var item in jobs) item.IsOpening = false; RefreshActiveRender(); }
                     if (line.StartsWith(statusPrefix) || line.StartsWith(logPrefix))
                     {
                         var statusLine = line.StartsWith(statusPrefix);
@@ -86,15 +87,17 @@ public partial class MainWindow
             }
             process.OutputDataReceived += (_, e) => Handle(e.Data);
             process.ErrorDataReceived += (_, e) => Handle(e.Data);
-            process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine();
+            foreach (var job in jobs) { job.IsBatchReserved = true; job.IsOpening = true; }
+            RefreshActiveRender();
+            StartPreparedWorker(process);
             await process.WaitForExitAsync();
             foreach (var job in jobs)
             {
                 Record(job, "Batch process exit: " + process.ExitCode);
                 if (job.Status is "Waiting" or "Rendering")
                 {
-                    job.Status = _cancelRequested || job.HasGlobalCancellationMarker() ? "Cancelled" : "Failed";
-                    job.FailureDetail = $"Batch worker exited before this camera finished (exit {process.ExitCode}).";
+                    job.Status = _cancelRequested || job.HasGlobalCancellationMarker() ? "Cancelled" : process.ExitCode == 75 ? "Waiting" : "Failed";
+                    job.FailureDetail = process.ExitCode == 75 ? "" : $"Batch worker exited before this camera finished (exit {process.ExitCode}).";
                 }
             }
         }
@@ -105,6 +108,7 @@ public partial class MainWindow
         }
         finally
         {
+            foreach (var job in jobs) { job.IsOpening = false; job.IsBatchReserved = false; }
             if (process != null) { try { if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); } } catch { } process.Dispose(); }
             _renderProcess = null;
             foreach (var log in logs.Values) log.Dispose();

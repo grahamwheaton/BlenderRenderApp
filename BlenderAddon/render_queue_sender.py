@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 9, 0),
+    "version": (5, 9, 1),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -103,16 +103,25 @@ def save_shared_scene():
     for attempt in range(3):
         try:
             result = bpy.ops.wm.save_mainfile()
-            if "FINISHED" not in result or bpy.data.is_dirty:
-                raise RuntimeError("Blender did not confirm the scene was saved.")
+            dirty_after = bool(bpy.data.is_dirty)
+            diagnostic = (f"save_mainfile returned {sorted(result)!r}; "
+                          f"is_dirty after save={dirty_after}; "
+                          f"file={getattr(bpy.data, 'filepath', '<unknown>')}")
+            print(f"[Render Queue Sender save attempt {attempt + 1}] {diagnostic}", flush=True)
+            if "FINISHED" not in result:
+                raise RuntimeError(f"Save operator did not finish. {diagnostic}")
+            if dirty_after:
+                raise RuntimeError(
+                    "Save operator returned FINISHED, but Blender still reports unsaved changes. "
+                    "This does not confirm a NAS/file-lock problem. Save manually, then send again. "
+                    + diagnostic)
             return
         except RuntimeError as error:
             transient = any(term in str(error).lower() for term in (
                 "backup", "cannot change old file", "access is denied", "permission", "being used by another process"))
             if not transient or attempt == 2:
                 raise RuntimeError(
-                    "Job NOT sent: Blender could not save the shared scene. "
-                    "Check NAS permissions/file locks, or use Save As to make a manual copy, then send again. "
+                    "Job NOT sent: shared-scene save validation failed. "
                     f"Original error: {error}"
                 ) from error
             time.sleep(attempt + 1)
@@ -187,7 +196,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.9.0", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.9.1", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Cloud Image (tiled) settings — requires app V5.8")

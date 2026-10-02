@@ -15,6 +15,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).parent))
 from stitch_tiles import stitch
 
+print("BRH_SCENE_READY", flush=True)
 job=json.loads(sys.argv[sys.argv.index('--')+1])
 j={k[0].lower()+k[1:]:v for k,v in job.items()}
 safe=lambda v:re.sub(r'[^A-Za-z0-9_.-]+','_',str(v))

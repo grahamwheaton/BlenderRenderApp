@@ -1,6 +1,8 @@
-# Blender Render Queue Sender V5.9.0
+# Blender Render Queue Sender V5.9.1
 
-Install `dist/Blender-Render-Queue-Sender-v5.9.0.zip` using Blender's Install from Disk, or install `render_queue_sender.py` directly.
+Install `dist/Blender-Render-Queue-Sender-v5.9.1.zip` using Blender's Install from Disk, or install `render_queue_sender.py` directly.
+
+V5.9.1 distinguishes a cancelled/non-finished save from a FINISHED save that still reports unsaved changes. Diagnostics include the operator result, dirty flag and file path, also printed to Blender's console. Submission remains blocked when saving cannot be verified; this update does not bypass that safeguard or assume every failure is a NAS lock.
 
 **Render > Cloud Render Image Selection** sends all selected scene cameras at the current frame in one batch. Requires launcher 6.6+. Each camera gets its own queue entry, resolution and camera-specific filename; workers reuse one loaded scene for available cameras. No scene copies or animation are created. Paths without `{camera_name}` automatically receive a camera-name prefix. Configure additional compositor File Output nodes with camera-specific paths as well.
 

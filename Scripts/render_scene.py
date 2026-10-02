@@ -12,6 +12,7 @@ import time
 import traceback
 import uuid
 
+print("BRH_SCENE_READY", flush=True)
 args = sys.argv[sys.argv.index("--") + 1:]
 camera_name, start_text, end_text, step_text, output_path, engine, width, height, scale, frame_rate, file_format, render_mode, overwrite, placeholders, ignore_compositor, transparent_background, viewport_shading, distributed_text, job_id, coordination_folder, compositor_output_text, compositor_output_node = args
 camera = bpy.data.objects.get(camera_name)
@@ -104,18 +105,31 @@ def compositor_frame_path(frame):
     settings = scene.render.image_settings
     previous_media = getattr(settings, 'media_type', None)
     previous_color, previous_depth = settings.color_mode, settings.color_depth
+    previous_extension = scene.render.use_file_extension
     try:
-        scene.render.filepath = os.path.join(directory, filename + ('' if multilayer else item_name))
+        modern = hasattr(compositor_node, 'directory')
+        # Modern File Output uses the literal template, without the scene output's
+        # implicit frame suffix. A sentinel consumes frame_path's automatic suffix
+        # while retaining Blender's own token expansion.
+        sentinel = '__BRH_FRAME_SUFFIX__'
+        template = os.path.join(directory, filename + ('' if multilayer else item_name))
+        scene.render.filepath = template + (sentinel + '####' if modern and '#' not in template else '')
         if previous_media is not None:
             settings.media_type = 'MULTI_LAYER_IMAGE' if multilayer else 'IMAGE'
-        settings.file_format = compositor_node.format.file_format
-        return bpy.path.abspath(scene.render.frame_path(frame=frame))
+        effective_format = compositor_node.format
+        if modern and not multilayer and len(items) and items[0].override_node_format:
+            effective_format = items[0].format
+        settings.file_format = effective_format.file_format
+        scene.render.use_file_extension = getattr(compositor_node, 'use_file_extension', previous_extension)
+        path = bpy.path.abspath(scene.render.frame_path(frame=frame))
+        return re.sub(re.escape(sentinel) + r'-?\d+', '', path) if modern else path
     finally:
         scene.render.filepath = previous_path
         if previous_media is not None:
             settings.media_type = previous_media
         settings.file_format = previous_format
         settings.color_mode, settings.color_depth = previous_color, previous_depth
+        scene.render.use_file_extension = previous_extension
 
 def report_completed_frame(render_scene):
     rendered_path = compositor_frame_path(render_scene.frame_current) if uses_compositor_output else bpy.path.abspath(render_scene.render.frame_path(frame=render_scene.frame_current))
@@ -293,6 +307,9 @@ def render_distributed():
         if not claimed_any:
             if os.environ.get('BRH_CAMERA_BATCH') == '1':
                 return  # Let this process try another camera instead of waiting on a peer.
+            if os.environ.get('BRH_PRELOADED') == '1':
+                print('BRH: Work claimed by other workers; releasing preloaded scene.', flush=True)
+                os._exit(75)
             time.sleep(2)
 
 try:

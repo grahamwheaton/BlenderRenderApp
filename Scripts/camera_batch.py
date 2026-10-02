@@ -9,6 +9,7 @@ import sys
 import time
 import traceback
 
+print("BRH_SCENE_READY", flush=True)
 packets = json.loads(Path(sys.argv[sys.argv.index('--') + 1]).read_text(encoding='utf-8-sig'))
 script = Path(__file__).with_name('render_scene.py')
 original_stdout = sys.stdout
@@ -68,6 +69,8 @@ while pending:
             pending.remove(packet)
             progressed = True
     if not progressed and pending:
+        if os.environ.get('BRH_PRELOADED') == '1':
+            os._exit(75)
         time.sleep(2)
 sys.stdout.flush()
 os._exit(0)

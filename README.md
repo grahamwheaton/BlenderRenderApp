@@ -1,5 +1,77 @@
 # Blender Render Launcher
 
+## V8.0.0 — queue-first UI (`ui-queue-first` branch)
+
+- Promotes the queue-first UI and the changes below to version 8.0.0.
+- Build: `dist/v8/Blender Render Launcher v8.0.0.exe`.
+- Sender add-on remains v5.9.1; no add-on version change is required for this app release.
+
+### Previous V7.0.10 changes
+
+- Completed rows always show View log and hide Render. If no local worker log exists, View log creates a labelled completion report with job details and available shared worker receipts; it does not claim to contain remote Blender console output.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.10.exe`. Sender add-on unchanged.
+
+### Previous V7.0.9 changes
+
+- Removed up/down row controls; drag handle retained.
+- Completion actions (PSD/MP4, log and sequence repair) are inline buttons, with Retry still available for failed jobs. No Actions dropdown. Worker/export/error details remain in the row tooltip.
+- Queue reserves a consistent vertical scrollbar gutter so the header and row edges align even with only a few jobs; removed ListBox default padding.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.9.exe`. Sender add-on unchanged.
+
+### Previous V7.0.8 changes
+
+- Top checkboxes grouped into Watch (Watch, Only my PC, Auto start, Auto retry, Force overwrite), Performance (Allow preload, Allow Children), and Automatic exports (Make PSD, Make MP4). Existing settings and behaviour unchanged.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.8.exe`. Sender add-on unchanged.
+
+### Previous V7.0.7 changes
+
+- Status column doubled from 85 to 170 pixels; full status remains available on hover.
+- Actions/details expander replaced with an Actions menu on the row. Existing eligible PSD/MP4 exports, logs, retry and sequence repair commands are retained, alongside diagnostic/export/worker messages.
+- Row action buttons share a 40-pixel height, consistent padding, spacing and vertical alignment, on one line.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.7.exe`. Sender add-on unchanged.
+
+### Previous V7.0.6 changes
+
+- Allow preload (off by default, saved per PC) opens one upcoming scene while the current queue runs. Resource checks use the existing CPU/GPU limits and RAM/VRAM reserves. Unknown telemetry disables speculative loading. Scene memory is estimated, not guaranteed.
+- Preloaded Blender waits without executing the render worker or claiming frames. At its turn the same process runs the normal worker/claim protocol. If all available work is claimed elsewhere, it exits and the queue moves on; the shared job remains visible for progress tracking.
+- Queue changes, source-file modification, cancellation and memory pressure discard an unused preload. Background renders, camera batches and viewport workers are supported; tiled jobs are not preloaded. Single-row Render does not preload another row.
+- Larger preview is now first. Actions stay on one horizontal line; narrow windows scroll horizontally instead of wrapping buttons.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.6.exe`. Sender add-on unchanged. Local Blender smoke tests cover deferred execution, same-process reuse and losing a frame claim; multi-PC production testing is still required.
+
+### Previous V7.0.5 changes
+
+- Fixed modern compositor File Output validation: no implicit frame suffix; honours explicit frame placeholders, output extensions and per-item format overrides. Tested with actual Blender 5.2 renders.
+- Ignore/Unignore skips a row locally, dims it and moves it to the bottom. It does not cancel other watchers.
+- Per-row Render runs only that waiting job on this PC (including only that camera in a batch). Auto start is turned off to avoid running the remaining queue afterwards.
+- Compact output paths retain the full path in their tooltip; row actions wrap instead of extending off the row.
+- Shared PNG/JPEG/BMP/TIFF previews follow the newest completion receipt, from any worker, every ten seconds using background polling. EXR decoding remains unsupported by the inline image preview.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.5.exe`. Sender add-on unchanged.
+
+### Previous V7.0.4 changes
+
+- Restart now republishes cloud-origin rows to their original watch folder after confirmation, using a fresh ID and preserving sender identity, render settings and output policy. All eligible watchers can pick it up; filters and Auto start still apply. Local jobs remain local. The original manifest/cancellation are untouched, active old claims block restart, and restarting a batch row resubmits only that camera.
+- Preview column shows the latest available row image. Generate preview launches an isolated background Workbench worker for the camera/start frame, producing a local temporary PNG without saving the `.blend` or writing to render outputs. Requests run one at a time.
+- Removed the Frames X–Y line from Actions/details. The compositor output-filename validation bug reported in the Patronus logs is NOT fixed in this release.
+
+- Per-row progress is 4px high. Completion opens Actions/details once; users can collapse it afterwards. Existing format/job-specific export and repair eligibility is unchanged.
+- Cancelled rows expose Restart (cloud/local routing as described above); restart is unavailable while the local queue is running.
+
+- Previews use an OnLoad decoder with read/write/delete sharing and dispose the source stream immediately. Regression tests keep the decoded image alive while exclusively opening, renaming and deleting its temporary source.
+- Starts maximized. Output links only occupy the visible text area; order controls are 40px. Clear and Cancel Everywhere are row buttons. Resolution includes scale and a Render engine column follows it (Saved setting means the scene's engine is retained).
+- Sender v5.9.1 adds precise save-validation diagnostics, without relaxing the save safeguard.
+
+- Compact inspector and tighter queue columns; edit-only actions appear only while editing.
+- Queue order is top to bottom, with a NEXT IN LINE marker. Up/down buttons and thresholded drag/drop reorder waiting jobs, including while a separate job runs. Camera jobs already dispatched together in a batch cannot be reordered mid-batch.
+- Click a Blender filename to open it in the configured Blender. Each row has a status icon and a 2-pixel progress bar. Opening is shown until the worker confirms scene loading has finished.
+
+- Queue table is the main workspace; select a row to review its settings. Expand **Actions / details** for exports, recovery, logs and global cancellation.
+- **Edit settings** unlocks a draft. **Add as new job** adds a separate local job, without modifying the original job or the `.blend`. Tiled/viewport copies retain their worker type but use a fresh, local claim namespace. Existing output paths are retained: choose a new path if you need separate results.
+- Loading/dropping a `.blend` switches **Auto start** off and queues every camera. Loaded camera tools, copy/paste, selection, output copying and contact sheets remain in the inspector's bottom expander.
+- The bottom progress/preview follows only the currently opening/rendering local job.
+- Read-only settings include advanced options; loading the source `.blend` is required to inspect camera keyframes for edited copies of received jobs.
+- Build: `dist/v7-ui-preview/Blender Render Launcher v7.0.4.exe`. Sender: `dist/Blender-Render-Queue-Sender-v5.9.1.zip` (unchanged).
+- UI regression: `dotnet run --project Tests/ChildWorkers -- --queue-ui` (isolated fixtures and WPF layout snapshots, not a live NAS rendering test).
+
 ## V6.6.0 — selected-camera still batches
 
 Install sender **5.9.0** and use **Render > Cloud Render Image Selection** with camera objects selected in the current scene. It saves the shared blend once if dirty and sends every selected camera at the current frame, with per-camera resolution. No animation is created and the active camera is not changed. Each camera gets a separate queue entry/claim/audit report. One atomic `.camerabatch.json` publishes the group; launcher 6.6+ is required (older launchers ignore these batches).

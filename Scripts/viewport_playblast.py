@@ -14,6 +14,7 @@ import time
 import traceback
 import uuid
 
+print("BRH_SCENE_READY", flush=True)
 args = sys.argv[sys.argv.index("--") + 1:]
 camera_name, start_text, end_text, step_text, output_path, width, height, scale, frame_rate, file_format, viewport_shading, show_overlays_text, overlay_settings_json, overwrite, job_id, coordination_folder = args
 scene = bpy.context.scene
@@ -236,6 +237,9 @@ def run_distributed_capture():
                     heartbeat_thread.join(timeout=1)
                     claim_path.unlink(missing_ok=True)
             if not claimed_any:
+                if os.environ.get('BRH_PRELOADED') == '1':
+                    print('BRH: Work claimed by other workers; releasing preloaded scene.', flush=True)
+                    os._exit(75)
                 time.sleep(2)
 
 try:

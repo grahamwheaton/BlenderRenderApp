@@ -90,6 +90,7 @@ public partial class MainWindow
     }
     private void StopRenderWorkers()
     {
+        StopPreload();
         foreach (var process in _childProcesses.Append(_renderProcess).OfType<Process>().ToArray())
             try { if (!process.HasExited) process.Kill(true); } catch { }
     }
@@ -134,7 +135,7 @@ public partial class MainWindow
             var info = MakeStartInfo(exe, args, job.RequiresViewport);
             if (child != null) info.Environment["BRH_CHILD_STOP_FILE"] = child.StopPath;
             else info.Environment.Remove("BRH_CHILD_STOP_FILE");
-            var process = new Process { StartInfo = info };
+            var process = child == null ? PrepareWorker(exe, args, job.RequiresViewport) : new Process { StartInfo = info };
             var prefix = child == null ? "" : $"[Child {child.Number}] ";
             process.OutputDataReceived += (_, e) =>
             {
@@ -159,6 +160,7 @@ public partial class MainWindow
                         }
                         return;
                     }
+                    WorkerReady(job, e.Data);
                     AppendLog(prefix + e.Data);
                     var match = FramePattern.Match(e.Data);
                     if (match.Success && int.TryParse(match.Groups[1].Value, out var reportedFrame))
@@ -170,7 +172,7 @@ public partial class MainWindow
                 });
             };
             process.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Dispatcher.Invoke(() => AppendLog(prefix + e.Data)); };
-            try { process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); }
+            try { StartPreparedWorker(process); }
             catch { try { if (!process.HasExited) process.Kill(true); } catch { } process.Dispose(); throw; }
             return process;
         }
