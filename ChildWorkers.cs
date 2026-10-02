@@ -6,20 +6,35 @@ using System.Windows;
 
 namespace BlenderRenderHeadless;
 
-public sealed record WorkerResources(double CpuPercent, double GpuPercent, double AvailableRamGb, double FreeVramGb, double UsedVramGb)
+public sealed record WorkerResources(double CpuPercent, double GpuPercent, double AvailableRamGb, double FreeVramGb, double UsedVramGb, double TotalRamGb = 0, double TotalVramGb = 0)
 {
-    public bool HasHeadroom(double workerRamGb) => CpuPercent is >= 0 and < 60 && GpuPercent is >= 0 and < 65
-        && AvailableRamGb >= Math.Max(8, workerRamGb * 2) && FreeVramGb >= Math.Max(4, UsedVramGb);
-    public bool UnderPressure => AvailableRamGb < 4 || FreeVramGb < 1;
+    public bool HasHeadroom(double workerRamGb, WorkerTuning? settings = null) => BlockReason(workerRamGb, settings ?? new()) == null;
+    public string? BlockReason(double workerRamGb, WorkerTuning settings, double workerVramGb = 1)
+    {
+        if (CpuPercent < 0 || CpuPercent > settings.MaxCpuPercent) return $"CPU {CpuPercent:0}% (limit {settings.MaxCpuPercent:0}%)";
+        if (GpuPercent < 0 || GpuPercent > settings.MaxGpuPercent) return $"GPU {GpuPercent:0}% (limit {settings.MaxGpuPercent:0}%)";
+        var ram = RamReserve(settings) + Math.Max(0, workerRamGb) * 1.15;
+        if (AvailableRamGb < ram) return $"free RAM {AvailableRamGb:0.0}/{ram:0.0} GB required";
+        var vram = VramReserve(settings) + Math.Max(0.5, workerVramGb) * 1.15;
+        if (FreeVramGb < vram) return $"free VRAM {FreeVramGb:0.0}/{vram:0.0} GB required";
+        return null;
+    }
+    public double RamReserve(WorkerTuning settings) => Math.Max(settings.MinimumRamGb, TotalRamGb * settings.MemoryReservePercent / 100);
+    public double VramReserve(WorkerTuning settings) => Math.Max(settings.MinimumVramGb, (TotalVramGb > 0 ? TotalVramGb : FreeVramGb + UsedVramGb) * settings.MemoryReservePercent / 100);
+    public bool UnderPressure(WorkerTuning settings) => AvailableRamGb < RamReserve(settings) || FreeVramGb < VramReserve(settings);
 }
 
 public static class ChildWorkerPolicy
 {
-    public static bool Eligible(RenderJob job) => job.Distributed && job.TileSize == 0 && job.RenderMode == "PLAYBLAST"
+    public static bool Eligible(RenderJob job) => job.Distributed && job.TileSize == 0 && (job.RenderMode == "PLAYBLAST" || job.Engine is "BLENDER_EEVEE" or "BLENDER_EEVEE_NEXT")
         && job.TotalFrameCount >= 24 && job.Format != "FFMPEG" && !string.IsNullOrWhiteSpace(job.CoordinationFolder);
-    public static bool WorthTrial(int localFrames, int remaining, double elapsedSeconds) => localFrames >= 3 && remaining >= 12
-        && elapsedSeconds >= 30 && remaining * elapsedSeconds / localFrames >= 60;
-    public static bool Improved(double baselineRate, int trialFrames, double trialSeconds) => trialSeconds > 0 && trialFrames / trialSeconds >= baselineRate * 1.1;
+    public static double RequiredRemaining(WorkerTuning settings, double startupSeconds) => Math.Max(settings.MinimumRemainingSeconds, startupSeconds * settings.StartupMultiplier);
+    public static bool WorthTrial(int localFrames, int remaining, double elapsedSeconds, WorkerTuning? settings = null, double startupSeconds = 5)
+    {
+        settings ??= new();
+        return localFrames >= 3 && remaining >= 12 && elapsedSeconds >= settings.WarmupSeconds && remaining * elapsedSeconds / localFrames >= RequiredRemaining(settings, startupSeconds);
+    }
+    public static bool Improved(double baselineRate, int trialFrames, double trialSeconds, WorkerTuning? settings = null) => trialSeconds > 0 && trialFrames / trialSeconds >= baselineRate * (1 + (settings ?? new()).MinimumGainPercent / 100);
 }
 
 internal sealed class WorkerResourceProbe
@@ -43,15 +58,18 @@ internal sealed class WorkerResourceProbe
         try
         {
             var info = new ProcessStartInfo("nvidia-smi.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            info.ArgumentList.Add("--query-gpu=utilization.gpu,memory.free,memory.used"); info.ArgumentList.Add("--format=csv,noheader,nounits");
+            info.ArgumentList.Add("--query-gpu=utilization.gpu,memory.free,memory.used,memory.total"); info.ArgumentList.Add("--format=csv,noheader,nounits");
             using var p = Process.Start(info)!; var output = p.StandardOutput.ReadToEndAsync(); var errors = p.StandardError.ReadToEndAsync();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
             try { await p.WaitForExitAsync(timeout.Token); }
             catch (OperationCanceledException) { try { p.Kill(true); } catch { } await p.WaitForExitAsync(); await output; await errors; return null; }
             var text = await output; await errors; if (p.ExitCode != 0) return null;
             var rows = text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.Split(',').Select(v => double.Parse(v.Trim(), CultureInfo.InvariantCulture)).ToArray()).ToArray();
-            if (rows.Length == 0 || rows.Any(r => r.Length != 3)) return null;
-            return new(cpu, rows.Max(r => r[0]), memory.AvailablePhysical / 1073741824.0, rows.Min(r => r[1]) / 1024, rows.Max(r => r[2]) / 1024);
+            if (rows.Length == 0 || rows.Any(r => r.Length != 4)) return null;
+            // Use a coherent worst-free-memory GPU sample, not free from one
+            // card plus used from another. Still gate utilization across cards.
+            var gpu = rows.OrderBy(r => r[1]).First();
+            return new(cpu, rows.Max(r => r[0]), memory.AvailablePhysical / 1073741824.0, gpu[1] / 1024, gpu[2] / 1024, memory.TotalPhysical / 1073741824.0, gpu[3] / 1024);
         }
         catch { return null; }
     }
@@ -59,7 +77,17 @@ internal sealed class WorkerResourceProbe
 
 public partial class MainWindow
 {
+    private WorkerTuning _workerTuning = new();
     private readonly List<Process> _childProcesses = new();
+    private sealed class ChildState
+    {
+        public Process Process = null!;
+        public Task Exit = Task.CompletedTask;
+        public string StopPath = "";
+        public int Number, StartCount;
+        public double StartedAt, FirstFrameAt, Baseline;
+        public bool Retiring;
+    }
     private void StopRenderWorkers()
     {
         foreach (var process in _childProcesses.Append(_renderProcess).OfType<Process>().ToArray())
@@ -69,129 +97,208 @@ public partial class MainWindow
     {
         if (!_suppressWatchChange && AllowChildrenCheckBox != null) SaveCurrentSettings();
     }
-
-    private async Task<int> RunWithChildrenAsync(string exe, string[] args, RenderJob job)
+    private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
+        e.Handled = true;
+        var dialog = new WorkerSettingsWindow(_workerTuning) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        var previous = _workerTuning;
+        _workerTuning = dialog.Settings;
+        try { SaveCurrentSettings(); }
+        catch (Exception ex) { _workerTuning = previous; MessageBox.Show(this, ex.Message, "Could not save settings"); }
+    }
+
+    private async Task<int> RunWithChildrenAsync(string exe, string[] args, RenderJob job, Func<Task<WorkerResources?>>? resourceReader = null)
+    {
+        // Immutable snapshot: changes in Settings apply only to the next job.
+        var tuning = _workerTuning;
         var localFrames = new HashSet<int>();
-        var childFrames = 0;
+        var children = new List<ChildState>();
         var clock = Stopwatch.StartNew();
         double? firstFrameAt = null;
-        var stopPath = Path.Combine(Path.GetTempPath(), "brh-child-stop-" + Guid.NewGuid().ToString("N"));
-        Process? child = null; Task? childExit = null;
-        bool triedChild = false, retiring = false;
-        double baseline = 0, childStartedAt = 0, trialReadyAt = 0;
-        int trialStartCount = 0, headroomSamples = 0;
+        double windowAt = 0, startupSeconds = 0;
+        int windowCount = 0, healthy = 0;
+        bool stopAdding = false;
+        string stopReason = "";
+        ChildState? trial = null;
         var probe = new WorkerResourceProbe();
+        resourceReader ??= probe.Read;
 
-        Process Launch(bool isChild)
+        void Status(string reason)
+        {
+            var count = 1 + children.Count(c => !c.Process.HasExited);
+            job.WorkerStatus = $"{count} Blender{(count == 1 ? "" : "s")} · {reason}";
+        }
+        Process Launch(ChildState? child)
         {
             var info = MakeStartInfo(exe, args, job.RequiresViewport);
-            if (isChild) info.Environment["BRH_CHILD_STOP_FILE"] = stopPath;
+            if (child != null) info.Environment["BRH_CHILD_STOP_FILE"] = child.StopPath;
             else info.Environment.Remove("BRH_CHILD_STOP_FILE");
             var process = new Process { StartInfo = info };
+            var prefix = child == null ? "" : $"[Child {child.Number}] ";
             process.OutputDataReceived += (_, e) =>
             {
                 if (string.IsNullOrWhiteSpace(e.Data)) return;
                 Dispatcher.Invoke(() =>
                 {
-                    if (e.Data.StartsWith("BRH_LOCAL_FRAME_DONE:") && int.TryParse(e.Data.Split(':')[1], out var ownedFrame))
+                    if (e.Data.StartsWith("BRH_LOCAL_FRAME_DONE:") && int.TryParse(e.Data.Split(':')[1], out var frame))
                     {
-                        localFrames.Add(ownedFrame); firstFrameAt ??= clock.Elapsed.TotalSeconds;
-                        if (isChild) childFrames++;
+                        localFrames.Add(frame);
+                        if (!firstFrameAt.HasValue)
+                        {
+                            firstFrameAt = clock.Elapsed.TotalSeconds;
+                            startupSeconds = firstFrameAt.Value;
+                            windowAt = firstFrameAt.Value;
+                            windowCount = localFrames.Count;
+                        }
+                        if (child != null && child.FirstFrameAt == 0)
+                        {
+                            child.FirstFrameAt = clock.Elapsed.TotalSeconds;
+                            child.StartCount = localFrames.Count;
+                            startupSeconds = Math.Max(startupSeconds, child.FirstFrameAt - child.StartedAt);
+                        }
                         return;
                     }
-                    AppendLog((isChild ? "[Child] " : "") + e.Data);
+                    AppendLog(prefix + e.Data);
                     var match = FramePattern.Match(e.Data);
-                    if (match.Success && int.TryParse(match.Groups[1].Value, out var frame))
+                    if (match.Success && int.TryParse(match.Groups[1].Value, out var reportedFrame))
                     {
                         int? completed = int.TryParse(match.Groups[3].Value, out var c) ? c : null;
                         int? total = int.TryParse(match.Groups[4].Value, out var t) ? t : null;
-                        job.ReportFrame(frame, match.Groups[2].Value, completed, total);
+                        job.ReportFrame(reportedFrame, match.Groups[2].Value, completed, total);
                     }
                 });
             };
-            process.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Dispatcher.Invoke(() => AppendLog((isChild ? "[Child] " : "") + e.Data)); };
+            process.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Dispatcher.Invoke(() => AppendLog(prefix + e.Data)); };
             try { process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); }
             catch { try { if (!process.HasExited) process.Kill(true); } catch { } process.Dispose(); throw; }
             return process;
         }
-
-        void Retire(string reason)
+        void Retire(ChildState child, string reason)
         {
-            if (retiring || child == null || child.HasExited) return;
-            try { File.WriteAllText(stopPath, "Stop before claiming another frame"); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { AppendLog("Could not request child retirement: " + ex.Message); return; }
-            retiring = true; job.WorkerStatus = "Child stopping after current frame · " + reason;
-            AppendLog(job.WorkerStatus);
+            if (child.Retiring || child.Process.HasExited) return;
+            try { File.WriteAllText(child.StopPath, "Stop before claiming another frame"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { AppendLog("Could not retire child: " + ex.Message); return; }
+            child.Retiring = true;
+            AppendLog($"Child {child.Number} stopping after current frame: {reason}");
         }
 
-        using var main = Launch(false); _renderProcess = main;
+        var beforeWorker = await Task.Run(resourceReader);
+        if (beforeWorker != null)
+            AppendLog($"Turbo resources: {beforeWorker.TotalRamGb:0.0} GB RAM, {beforeWorker.TotalVramGb:0.0} GB VRAM; reserves {beforeWorker.RamReserve(tuning):0.0} GB RAM / {beforeWorker.VramReserve(tuning):0.0} GB VRAM. Limits CPU {tuning.MaxCpuPercent:0}% / GPU {tuning.MaxGpuPercent:0}%.");
+        double workerVramEstimate = 0.5;
+        if (_cancelRequested || job.IsGloballyCancelled) return 1;
+        clock.Restart();
+        using var main = Launch(null); _renderProcess = main;
         var mainExit = main.WaitForExitAsync();
-        job.WorkerStatus = "1 Blender · measuring headroom";
+        Status("warming up");
         try
         {
-            while (await Task.WhenAny(mainExit, Task.Delay(10000)) != mainExit)
+            // Prime CPU deltas immediately rather than losing one check interval.
+            await Task.Run(resourceReader);
+            while (await Task.WhenAny(mainExit, Task.Delay(TimeSpan.FromSeconds(tuning.CheckSeconds))) != mainExit)
             {
                 if (_cancelRequested || job.IsGloballyCancelled || job.HasGlobalCancellationMarker()) { StopRenderWorkers(); break; }
                 if (job.Progress >= 100 && await Task.Run(job.HasVerifiedSequenceCompletion))
                 {
-                    // Files and claims have been verified before stopping a
-                    // worker whose post-render shutdown is stuck.
                     if (await Task.WhenAny(mainExit, Task.Delay(10000)) != mainExit) StopRenderWorkers();
                     await mainExit;
                     return 0;
                 }
-                var resources = await Task.Run(probe.Read);
+                var resources = await Task.Run(resourceReader);
                 if (_cancelRequested || job.IsGloballyCancelled || job.HasGlobalCancellationMarker()) { StopRenderWorkers(); break; }
                 if (main.HasExited) break;
                 main.Refresh();
+                var now = clock.Elapsed.TotalSeconds;
+                var live = children.Where(c => !c.Process.HasExited).ToList();
+                if (children.Any(c => c.Process.HasExited && c.Process.ExitCode != 0))
+                { stopAdding = true; stopReason = "child failed; primary continues"; }
+                if (resources != null && beforeWorker != null)
+                    workerVramEstimate = Math.Max(workerVramEstimate, Math.Max(0, resources.UsedVramGb - beforeWorker.UsedVramGb) / (1 + live.Count));
+                if (live.Count > 0 && (resources == null || resources.UnderPressure(tuning)))
+                {
+                    var newest = live.LastOrDefault(c => !c.Retiring);
+                    if (newest != null) Retire(newest, "low RAM/VRAM or unavailable telemetry");
+                    stopAdding = true; stopReason = "resource pressure";
+                }
+                if (trial != null)
+                {
+                    if (trial.Process.HasExited || trial.Retiring)
+                    { trial = null; stopAdding = true; if (stopReason == "") stopReason = "trial worker stopped"; }
+                    else if (trial.FirstFrameAt == 0)
+                    {
+                        if (now - trial.StartedAt > Math.Clamp(startupSeconds * 4, 30, 180))
+                        { Retire(trial, "startup too slow"); stopAdding = true; stopReason = "child startup too slow"; }
+                        Status($"child {trial.Number} starting ({now - trial.StartedAt:0}s)");
+                        continue;
+                    }
+                    else if (now - trial.FirstFrameAt < tuning.TrialSeconds)
+                    { Status($"testing child {trial.Number}: {now - trial.FirstFrameAt:0}/{tuning.TrialSeconds:0}s"); continue; }
+                    else
+                    {
+                        var seconds = now - trial.FirstFrameAt;
+                        var frames = localFrames.Count - trial.StartCount;
+                        var improved = ChildWorkerPolicy.Improved(trial.Baseline, frames, seconds, tuning);
+                        AppendLog($"Child {trial.Number} trial: {frames / seconds:0.00} frames/s vs {trial.Baseline:0.00} baseline.");
+                        if (!improved)
+                        { Retire(trial, $"less than {tuning.MinimumGainPercent:0}% gain"); stopAdding = true; stopReason = "no useful throughput gain"; }
+                        trial = null; healthy = 0; windowAt = now; windowCount = localFrames.Count;
+                        Status(improved ? "throughput gain confirmed; measuring next step" : stopReason);
+                        continue;
+                    }
+                }
+                if (live.Any(c => c.Retiring)) { Status("child stopping after current frame"); continue; }
+                if (stopAdding) { Status(stopReason); continue; }
+                if (live.Count >= tuning.MaxChildren) { Status($"child limit reached ({live.Count}/{tuning.MaxChildren})"); continue; }
+                var block = resources?.BlockReason(main.PrivateMemorySize64 / 1073741824.0, tuning, workerVramEstimate);
+                if (beforeWorker == null) block = "startup GPU memory baseline unavailable; no child";
+                if (resources == null) block = "GPU telemetry unavailable; no child";
+                healthy = block == null ? healthy + 1 : 0;
+                if (block != null) { Status(block); continue; }
+                if (!firstFrameAt.HasValue) { Status("waiting for first completed frame"); continue; }
+                var elapsed = now - windowAt;
+                var gained = localFrames.Count - windowCount;
+                if (elapsed < tuning.WarmupSeconds || gained < 3)
+                { Status($"warm-up {elapsed:0}/{tuning.WarmupSeconds:0}s · {gained}/3 timing frames"); continue; }
+                if (healthy < tuning.HealthyChecks) { Status($"healthy resource checks {healthy}/{tuning.HealthyChecks}"); continue; }
                 var remaining = Math.Max(0, job.TotalFrameCount - (int)Math.Round(job.Progress * job.TotalFrameCount / 100));
-                if (!triedChild)
+                var estimated = remaining * elapsed / gained;
+                var needed = ChildWorkerPolicy.RequiredRemaining(tuning, startupSeconds);
+                if (!ChildWorkerPolicy.WorthTrial(gained, remaining, elapsed, tuning, startupSeconds))
+                { Status($"not enough work left: {remaining} frames, ~{estimated:0}s (need 12 frames and {needed:0}s)"); continue; }
+                var next = new ChildState
                 {
-                    var elapsed = firstFrameAt.HasValue ? clock.Elapsed.TotalSeconds - firstFrameAt.Value : 0;
-                    var hasRoom = resources?.HasHeadroom(main.PrivateMemorySize64 / 1073741824.0) == true;
-                    headroomSamples = hasRoom ? headroomSamples + 1 : 0;
-                    job.WorkerStatus = resources == null ? "1 Blender · GPU telemetry unavailable; no child" : hasRoom ? "1 Blender · measuring potential speed-up" : "1 Blender · keeping resource headroom";
-                    if (headroomSamples < 3 || !ChildWorkerPolicy.WorthTrial(localFrames.Count - 1, remaining, elapsed)) continue;
-                    triedChild = true; baseline = (localFrames.Count - 1) / elapsed;
-                    try
-                    {
-                        child = Launch(true); _childProcesses.Add(child); childExit = child.WaitForExitAsync(); childStartedAt = clock.Elapsed.TotalSeconds;
-                        job.WorkerStatus = "2 Blenders · testing throughput"; AppendLog($"Allow Children: launched one extra worker using the same frame claims. Baseline {baseline:0.00} frames/s.");
-                    }
-                    catch (Exception ex) { job.WorkerStatus = "1 Blender · child could not start"; AppendLog(ex.Message); }
-                }
-                else if (child != null)
+                    Number = children.Count + 1, Baseline = gained / elapsed, StartedAt = now,
+                    StopPath = Path.Combine(Path.GetTempPath(), "brh-child-stop-" + Guid.NewGuid().ToString("N"))
+                };
+                try
                 {
-                    if (child.HasExited) { job.WorkerStatus = "1 Blender · child " + (child.ExitCode == 0 ? "finished" : "failed; primary continues"); continue; }
-                    if (resources == null || resources.UnderPressure) Retire("resource pressure or unavailable telemetry");
-                    if (childFrames == 0 && clock.Elapsed.TotalSeconds - childStartedAt > 120) Retire("startup too slow");
-                    if (childFrames > 0 && trialReadyAt == 0) { trialReadyAt = clock.Elapsed.TotalSeconds; trialStartCount = localFrames.Count; }
-                    if (!retiring && trialReadyAt > 0 && clock.Elapsed.TotalSeconds - trialReadyAt >= 60)
-                    {
-                        var improved = ChildWorkerPolicy.Improved(baseline, localFrames.Count - trialStartCount, clock.Elapsed.TotalSeconds - trialReadyAt);
-                        if (!improved) Retire("less than 10% throughput gain");
-                        else job.WorkerStatus = "2 Blenders · throughput gain confirmed";
-                    }
+                    next.Process = Launch(next); next.Exit = next.Process.WaitForExitAsync();
+                    children.Add(next); _childProcesses.Add(next.Process); trial = next; healthy = 0;
+                    Status($"child {next.Number} starting");
+                    AppendLog($"Allow Children: launched child {next.Number}/{tuning.MaxChildren}; baseline {next.Baseline:0.00} frames/s; startup estimate {startupSeconds:0.0}s; remaining ~{estimated:0}s.");
+                    AppendLog($"Turbo memory: estimated child VRAM {workerVramEstimate:0.0} GB (+15% margin); {resources!.FreeVramGb:0.0} GB free of {resources.TotalVramGb:0.0} GB.");
                 }
+                catch (Exception ex) { stopAdding = true; stopReason = "child could not start"; Status(stopReason); AppendLog(ex.Message); }
             }
             await mainExit;
             return main.ExitCode;
         }
         finally
         {
-            if (child != null)
+            foreach (var child in children) Retire(child, "job ended");
+            var allChildren = Task.WhenAll(children.Select(c => c.Exit));
+            if (await Task.WhenAny(allChildren, Task.Delay(10000)) != allChildren)
+                foreach (var child in children) try { if (!child.Process.HasExited) child.Process.Kill(true); } catch { }
+            await allChildren;
+            foreach (var child in children)
             {
-                Retire("job ended");
-                if (childExit != null && await Task.WhenAny(childExit, Task.Delay(10000)) != childExit)
-                    try { child.Kill(true); } catch { }
-                if (childExit != null) await childExit;
-                _childProcesses.Remove(child); child.Dispose();
+                AppendLog($"Child {child.Number} exit code: {child.Process.ExitCode} (0x{unchecked((uint)child.Process.ExitCode):X8})");
+                _childProcesses.Remove(child.Process); child.Process.Dispose();
+                try { if (File.Exists(child.StopPath)) File.Delete(child.StopPath); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             }
             if (!main.HasExited) { try { main.Kill(true); } catch { } await mainExit; }
-            _renderProcess = null;
-            try { if (File.Exists(stopPath)) File.Delete(stopPath); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-            job.WorkerStatus = "Local Blender workers stopped";
+            _renderProcess = null; job.WorkerStatus = "Local Blender workers stopped";
         }
     }
 }

@@ -89,6 +89,8 @@ public static class Mp4Encoder
 {
     public static string? FindFfmpeg()
     {
+        try { return BundledFfmpeg.Resolve(); }
+        catch (Exception ex) { Debug.WriteLine("Bundled FFmpeg unavailable: " + ex.Message); }
         foreach (var directory in new[] { AppContext.BaseDirectory }.Concat((Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)))
         {
             try { var file = new FileInfo(Path.Combine(directory.Trim('"'), "ffmpeg.exe")); if (file.Exists) return file.ResolveLinkTarget(true)?.FullName ?? file.FullName; }

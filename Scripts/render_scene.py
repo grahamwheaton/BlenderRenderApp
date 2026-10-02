@@ -180,7 +180,7 @@ def render_distributed():
         return compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
 
     def write_render_report():
-        output_directory = os.path.dirname(frame_output_path(frames[0]))
+        output_directory = coordination_folder
         report_name = f"render-report-{re.sub(r'[^A-Za-z0-9_.-]+', '_', camera_name)}-{safe_job_id[:8]}.csv"
         report_path = os.path.join(output_directory, report_name)
         temporary_report = report_path + '.' + uuid.uuid4().hex + '.tmp'
@@ -262,6 +262,8 @@ def render_distributed():
                     continue
                 if replace_existing or not valid_output(frame):
                     scene.frame_set(frame)
+                    if os.environ.get('BRH_CAMERA_BATCH') == '1':
+                        scene.camera = camera  # Timeline camera markers must not override this selected camera.
                     if uses_compositor_output:
                         bpy.ops.render.render()
                     else:
@@ -289,6 +291,8 @@ def render_distributed():
                 except OSError:
                     pass
         if not claimed_any:
+            if os.environ.get('BRH_CAMERA_BATCH') == '1':
+                return  # Let this process try another camera instead of waiting on a peer.
             time.sleep(2)
 
 try:
@@ -310,8 +314,11 @@ except Exception:
     traceback.print_exc()
     sys.stdout.flush()
     sys.stderr.flush()
+    if os.environ.get('BRH_CAMERA_BATCH') == '1':
+        raise
     os._exit(1)
 sys.stdout.flush()
 # Some third-party add-ons can hang or fail while Blender unregisters them in
 # background mode. The render has completed and its files are closed at this point.
-os._exit(0)
+if os.environ.get('BRH_CAMERA_BATCH') != '1':
+    os._exit(0)

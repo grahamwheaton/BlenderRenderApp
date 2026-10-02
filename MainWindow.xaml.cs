@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     }
     private async void StartAutomaticExport(RenderJob job, string kind)
     {
+        if (_watchCleanupRunning) return;
         if (!_autoExportAttempts.Add(job.LocalExportId + kind)) return;
         job.ExportStatus = kind + " conversion queued…";
         await _exportSerial.WaitAsync();
@@ -91,6 +92,7 @@ public partial class MainWindow : Window
         QueueItems.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(QueueItems_Click));
         _blenderExe = FindBlender();
         var savedSettings = LoadAppSettings();
+        _workerTuning = savedSettings.WorkerTuning is { } tuning && tuning.Validate() == null ? tuning : new();
         foreach (var jobId in savedSettings.DismissedJobIds ?? [])
             if (!string.IsNullOrWhiteSpace(jobId)) _dismissedJobIds.Add(jobId);
         _cloudQueueFolder = string.IsNullOrWhiteSpace(savedSettings.CloudQueueFolder) ? DefaultCloudQueueFolder : savedSettings.CloudQueueFolder;
@@ -103,6 +105,8 @@ public partial class MainWindow : Window
         AutoPsdCheckBox.IsChecked = savedSettings.MakePsd;
         AutoMp4CheckBox.IsChecked = savedSettings.MakeMp4;
         AllowChildrenCheckBox.IsChecked = savedSettings.AllowChildren;
+        AutoRetryCheckBox.IsChecked = savedSettings.AutoRetry;
+        ForceOverwriteCheckBox.IsChecked = savedSettings.ForceOverwrite;
         _suppressWatchChange = false;
         _watchTimer.Tick += WatchTimer_Tick;
         _progressTimer.Tick += ProgressTimer_Tick;
@@ -116,6 +120,7 @@ public partial class MainWindow : Window
         Closed += (_, _) => { _cancelRequested = true; StopRenderWorkers(); _progressTimer.Stop(); StopWatchMode(); };
         Closing += (_, e) =>
         {
+            if (_watchCleanupRunning) { e.Cancel = true; MessageBox.Show(this, "Please wait for watch-folder cleanup to finish.", "Cleanup running"); return; }
             if (_exportSerial.CurrentCount == 0)
             {
                 e.Cancel = true;
@@ -214,6 +219,7 @@ public partial class MainWindow : Window
         }
         foreach (var job in _queue.Where(item => item.Distributed && item.Status is "Waiting" or "Rendering"))
         {
+            job.ClaimedBy = SharedClaimStatus.Read(job);
             try
             {
                 var claimFolder = Path.Combine(job.CoordinationFolder, "_claims", SafeJobId(job.JobId));
@@ -247,7 +253,7 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(_cloudQueueFolder) || !Directory.Exists(_cloudQueueFolder)) return;
         try
         {
-            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.tilejob.json")).OrderBy(File.GetCreationTimeUtc))
+            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.tilejob.json")).Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.camerabatch.json")).OrderBy(File.GetCreationTimeUtc))
             {
                 if (!_seenCloudFiles.Add(file)) continue;
                 try { QueueIncomingJob(File.ReadAllText(file, Encoding.UTF8), "Cloud", file); }
@@ -259,6 +265,23 @@ public partial class MainWindow : Window
 
     private bool QueueIncomingJob(string json, string source, string? cloudJobFile = null)
     {
+        try
+        {
+            using var envelope = JsonDocument.Parse(json);
+            if (envelope.RootElement.ValueKind != JsonValueKind.Object) return false;
+            if (envelope.RootElement.TryGetProperty("jobs", out var batchJobs))
+            {
+                if (cloudJobFile == null || batchJobs.ValueKind != JsonValueKind.Array) return false;
+                if (!envelope.RootElement.TryGetProperty("batchId", out var batchId) || !Guid.TryParse(batchId.GetString(), out _)) return false;
+                foreach (var entry in batchJobs.EnumerateArray())
+                    if (entry.ValueKind != JsonValueKind.Object || entry.TryGetProperty("jobs", out _) ||
+                        !entry.TryGetProperty("batchId", out var childId) || childId.GetString() != batchId.GetString()) return false;
+                var accepted = true;
+                foreach (var entry in batchJobs.EnumerateArray()) accepted &= QueueIncomingJob(entry.GetRawText(), source, cloudJobFile);
+                return accepted;
+            }
+        }
+        catch (JsonException ex) { AppendLog($"Rejected {source} job: {ex.Message}"); return false; }
         IncomingRenderJob? incoming;
         try { incoming = JsonSerializer.Deserialize<IncomingRenderJob>(json, JobJsonOptions); }
         catch (JsonException ex) { AppendLog($"Rejected {source} job: {ex.Message}"); return false; }
@@ -351,7 +374,16 @@ public partial class MainWindow : Window
     private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BlenderRenderLauncher", "settings.json");
     private static AppSettings LoadAppSettings()
     {
-        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new(DefaultCloudQueueFolder, false, false) : new(DefaultCloudQueueFolder, false, false); }
+        try
+        {
+            if (!File.Exists(SettingsPath)) return new(DefaultCloudQueueFolder, false, false);
+            var json = File.ReadAllText(SettingsPath);
+            var saved = JsonSerializer.Deserialize<AppSettings>(json) ?? new(DefaultCloudQueueFolder, false, false);
+            using var document = JsonDocument.Parse(json);
+            if (saved.WorkerTuning is { } old && document.RootElement.TryGetProperty("WorkerTuning", out var node) && node.ValueKind == JsonValueKind.Object && !node.TryGetProperty("PolicyVersion", out _))
+                saved = saved with { WorkerTuning = old.UpgradeLegacy() };
+            return saved;
+        }
         catch { return new(DefaultCloudQueueFolder, false, false); }
     }
     private static void SaveAppSettings(AppSettings settings)
@@ -361,7 +393,7 @@ public partial class MainWindow : Window
     }
     private void SaveCurrentSettings()
     {
-        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList(), AutoPsdCheckBox.IsChecked == true, AutoMp4CheckBox.IsChecked == true, AllowChildrenCheckBox.IsChecked == true));
+        SaveAppSettings(new AppSettings(_cloudQueueFolder, AutoStartCheckBox.IsChecked == true, OnlyMyPcCheckBox.IsChecked == true, _dismissedJobIds.TakeLast(1000).ToList(), AutoPsdCheckBox.IsChecked == true, AutoMp4CheckBox.IsChecked == true, AllowChildrenCheckBox.IsChecked == true, _workerTuning, AutoRetryCheckBox.IsChecked == true, ForceOverwriteCheckBox.IsChecked == true));
     }
 
     private static string? FindBlender()
@@ -738,6 +770,7 @@ public partial class MainWindow : Window
 
     private async void RenderQueueButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_watchCleanupRunning) return;
         if (_queueRunning) { _cancelRequested = true; StopRenderWorkers(); return; }
         if (_blenderExe is null) return;
         _autoStartAt = null; WatchCountdownText.Visibility = Visibility.Collapsed;
@@ -746,7 +779,19 @@ public partial class MainWindow : Window
         {
             if (job.Status != "Waiting") continue;
             if (_cancelRequested) { job.Status = "Cancelled"; break; }
+            if (!string.IsNullOrEmpty(job.BatchId))
+            {
+                var batch = _queue.Where(j => j.Status == "Waiting" && j.BatchId == job.BatchId && j.BlendFile == job.BlendFile && j.CoordinationFolder == job.CoordinationFolder).ToList();
+                await RunCameraBatchWithRetries(batch);
+                continue;
+            }
+            for (var retries = 0; ; retries++)
+            {
             job.Begin(); _activeRenderJob = job; StatusText.Text = $"Rendering {job.CameraName} · {job.FrameSummary}";
+            BeginAttemptLog(job);
+            var overwrite = job.Overwrite || ForceOverwriteCheckBox.IsChecked == true;
+            WriteAttemptLog($"Force overwrite: {ForceOverwriteCheckBox.IsChecked == true}; effective overwrite: {overwrite}");
+            WriteAttemptLog($"Attempt {retries + 1}; auto retry {(AutoRetryCheckBox.IsChecked == true ? "enabled" : "disabled")}");
             AppendLog($"\n[{job.CameraName}] {job.ModeSummary} · {job.FrameSummary}");
             try
             {
@@ -762,25 +807,30 @@ public partial class MainWindow : Window
                 {
                     if (string.IsNullOrWhiteSpace(job.CoordinationFolder)) throw new InvalidOperationException("Viewport jobs require the shared NAS coordination folder.");
                     script = ExtractScript("viewport_playblast.py");
-                    args = [job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.ViewportShading, job.ShowOverlays ? "1" : "0", job.ViewportOverlaySettingsJson, job.Overwrite ? "1" : "0", job.JobId, job.CoordinationFolder];
+                    args = [job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.ViewportShading, job.ShowOverlays ? "1" : "0", job.ViewportOverlaySettingsJson, overwrite ? "1" : "0", job.JobId, job.CoordinationFolder];
                 }
                 else
                 {
                     script = ExtractScript("render_scene.py");
-                    args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, job.Overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder, job.UsesCompositorOutput ? "1" : "0", job.CompositorOutputNode];
+                    args = ["--background", job.BlendFile, "--python", script, "--", job.CameraName, job.StartFrame, job.EndFrame, job.FrameStep, job.OutputPath, job.Engine, job.Width, job.Height, job.Scale, job.FrameRate, job.Format, job.RenderMode, overwrite ? "1" : "0", job.Placeholders ? "1" : "0", job.IgnoreCompositor ? "1" : "0", job.TransparentBackground ? "1" : "0", job.ViewportShading, job.Distributed ? "1" : "0", job.JobId, job.CoordinationFolder, job.UsesCompositorOutput ? "1" : "0", job.CompositorOutputNode];
                 }
                 var useChildren = AllowChildrenCheckBox.IsChecked == true && ChildWorkerPolicy.Eligible(job);
+                WriteAttemptLog("Command arguments: " + JsonSerializer.Serialize(args));
                 if (AllowChildrenCheckBox.IsChecked == true && !useChildren)
-                    job.WorkerStatus = "1 Blender · children require a shared playblast of 24+ frames";
+                    job.WorkerStatus = "1 Blender · children require a shared playblast/Eevee sequence of 24+ frames";
                 var code = useChildren
                     ? await RunWithChildrenAsync(_blenderExe, args, job)
                     : await RunStreamingAsync(_blenderExe, args, job, job.RequiresViewport);
+                AppendLog($"Blender exit code: {code} (0x{unchecked((uint)code):X8})");
                 if (job.HasGlobalCancellationMarker()) job.MarkGloballyCancelled();
                 job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : code == 0 ? "Complete" : "Failed";
+                if (job.Status == "Failed") job.FailureDetail = $"Blender exited with code {code}. Open View log for details.";
                 if (code == 0 && !_cancelRequested && !job.IsGloballyCancelled) job.Finish();
             }
-            catch (Exception ex) { job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : "Failed"; AppendLog(ex.Message); }
-            finally { if (ReferenceEquals(_activeRenderJob, job)) _activeRenderJob = null; }
+            catch (Exception ex) { job.Status = _cancelRequested || job.IsGloballyCancelled ? "Cancelled" : "Failed"; job.FailureDetail = ex.Message; AppendLog(ex.ToString()); }
+            finally { EndAttemptLog(job); if (ReferenceEquals(_activeRenderJob, job)) _activeRenderJob = null; }
+            if (!await WaitForAutomaticRetry(job, retries)) break;
+            }
         }
         _queueRunning = false; _activeRenderJob = null; _renderProcess = null; SetUiRunning(false); UpdateQueueState();
         StatusText.Text = _cancelRequested ? "Queue cancelled" : _queue.Any(j => j.Status == "Failed") ? "Queue finished with errors" : "Queue finished";
@@ -792,6 +842,7 @@ public partial class MainWindow : Window
     private void SetUiRunning(bool running)
     {
         AllowChildrenCheckBox.IsEnabled = !running;
+        ForceOverwriteCheckBox.IsEnabled = !running;
         DropZone.IsEnabled = CameraItems.IsEnabled = AddQueueButton.IsEnabled = BlenderButton.IsEnabled = ContactSheetButton.IsEnabled = ClearQueueButton.IsEnabled = ClearCompletedButton.IsEnabled = !running;
         foreach (var job in _queue) job.CanRemove = !running;
         RenderQueueButton.Content = running ? "Cancel queue" : $"▶  Render {_queue.Count(j => j.Status == "Waiting")} jobs";
@@ -848,15 +899,16 @@ public partial class MainWindow : Window
         return process.ExitCode;
     }
     private void SetLog(string text) { LogBox.Text = text; EmptyLogText.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed; LogBox.ScrollToEnd(); }
-    private void AppendLog(string text) { EmptyLogText.Visibility = Visibility.Collapsed; LogBox.AppendText(text + Environment.NewLine); LogBox.ScrollToEnd(); }
+    private void AppendLog(string text) { WriteAttemptLog(text); EmptyLogText.Visibility = Visibility.Collapsed; LogBox.AppendText(text + Environment.NewLine); LogBox.ScrollToEnd(); }
     private static string Tail(string value, int length) => value.Length <= length ? value : value[^length..];
     private sealed record SceneInfo(List<string> cameras, string? active_camera, int frame_start, int frame_end, int frame_step, string output_path, bool save_output, bool uses_compositor_output, string? compositor_output_node, bool show_overlays, Dictionary<string, JsonElement> viewport_overlay_settings, string render_engine, int resolution_x, int resolution_y, int resolution_percentage, string file_format, double frame_rate, bool use_overwrite, bool use_placeholder, bool use_compositing, bool film_transparent, Dictionary<string, string> thumbnails, Dictionary<string, CameraResolutionInfo> camera_settings, Dictionary<string, CameraKeyframeInfo?> camera_keyframes);
     private sealed record CameraResolutionInfo(bool uses_per_camera_resolution, int resolution_x, int resolution_y, int resolution_percentage);
     private sealed record CameraKeyframeInfo(int start, int end);
-    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null, bool MakePsd = false, bool MakeMp4 = false, bool AllowChildren = false);
+    private sealed record AppSettings(string? CloudQueueFolder, bool AutoStart, bool OnlyMyPc = false, List<string>? DismissedJobIds = null, bool MakePsd = false, bool MakeMp4 = false, bool AllowChildren = false, WorkerTuning? WorkerTuning = null, bool AutoRetry = true, bool ForceOverwrite = false);
 
     private sealed class IncomingRenderJob
     {
+        public string BatchId { get; set; } = "";
         public int TileSize { get; set; }
         public int TileOverlap { get; set; } = 128;
         public int Version { get; set; } = 1;
@@ -894,6 +946,7 @@ public partial class MainWindow : Window
         {
             var job = new RenderJob
             {
+            BatchId = BatchId,
             TileSize = TileSize, TileOverlap = TileOverlap,
             BlendFile = BlendFile, CameraName = CameraName, StartFrame = StartFrame.ToString(CultureInfo.InvariantCulture),
             EndFrame = EndFrame.ToString(CultureInfo.InvariantCulture), FrameStep = Math.Max(1, FrameStep).ToString(CultureInfo.InvariantCulture),
@@ -1015,6 +1068,7 @@ public class CameraSetup : NotifyBase
 
 public class RenderJob : NotifyBase
 {
+    public string BatchId { get; init; } = "";
     public string LocalExportId { get; } = Guid.NewGuid().ToString("N");
     private string _workerStatus = "";
     public string WorkerStatus { get => _workerStatus; set => Set(ref _workerStatus, value); }
@@ -1029,7 +1083,17 @@ public class RenderJob : NotifyBase
     public bool UsesCompositorOutput { get; init; } public string CompositorOutputNode { get; init; } = "";
     public bool ShowOverlays { get; init; } public string ViewportOverlaySettingsJson { get; init; } = "{}";
     public bool Overwrite { get; init; } public bool Placeholders { get; init; } public bool IgnoreCompositor { get; init; } public bool TransparentBackground { get; init; }
-    private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) { OnPropertyChanged(nameof(StatusBrush)); OnPropertyChanged(nameof(GlobalCancelVisibility)); OnPropertyChanged(nameof(Mp4Visibility)); OnPropertyChanged(nameof(PsdVisibility)); } } }
+private string _status = "Waiting"; public string Status { get => _status; set { if (Set(ref _status, value)) { OnPropertyChanged(nameof(StatusBrush)); OnPropertyChanged(nameof(StatusDisplay)); OnPropertyChanged(nameof(GlobalCancelVisibility)); OnPropertyChanged(nameof(Mp4Visibility)); OnPropertyChanged(nameof(PsdVisibility)); OnPropertyChanged(nameof(RepairVisibility)); OnPropertyChanged(nameof(RetryVisibility)); } } }
+    private string _claimedBy = "";
+    public string ClaimedBy { get => _claimedBy; set { if (Set(ref _claimedBy, value)) OnPropertyChanged(nameof(StatusDisplay)); } }
+    public string StatusDisplay => !string.IsNullOrEmpty(ClaimedBy) && Status is "Waiting" or "Rendering" ? "Job claimed by " + ClaimedBy : Status;
+    private string _logPath = "";
+    public string LogPath { get => _logPath; set { if (Set(ref _logPath, value)) OnPropertyChanged(nameof(LogVisibility)); } }
+    private string _failureDetail = "";
+    public string FailureDetail { get => _failureDetail; set => Set(ref _failureDetail, value); }
+    public Visibility LogVisibility => string.IsNullOrEmpty(LogPath) ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility RetryVisibility => Status == "Failed" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility RepairVisibility => Status == "Complete" && Distributed && TileSize == 0 && TotalFrameCount > 1 && Format != "FFMPEG" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility PsdVisibility => Status == "Complete" && (TileSize > 0 || Format is "OPEN_EXR" or "OPEN_EXR_MULTILAYER") ? Visibility.Visible : Visibility.Collapsed;
     public Visibility Mp4Visibility => Status == "Complete" && TileSize == 0 && TotalFrameCount > 1 && Format is "PNG" or "JPEG" or "TIFF" ? Visibility.Visible : Visibility.Collapsed;
     public Dictionary<int, string> RenderedFiles { get; } = new();

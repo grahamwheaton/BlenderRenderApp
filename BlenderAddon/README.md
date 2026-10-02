@@ -1,6 +1,10 @@
-# Blender Render Queue Sender V5.7
+# Blender Render Queue Sender V5.9.0
 
-Install `render_queue_sender.py` as a Blender add-on.
+Install `dist/Blender-Render-Queue-Sender-v5.9.0.zip` using Blender's Install from Disk, or install `render_queue_sender.py` directly.
+
+**Render > Cloud Render Image Selection** sends all selected scene cameras at the current frame in one batch. Requires launcher 6.6+. Each camera gets its own queue entry, resolution and camera-specific filename; workers reuse one loaded scene for available cameras. No scene copies or animation are created. Paths without `{camera_name}` automatically receive a camera-name prefix. Configure additional compositor File Output nodes with camera-specific paths as well.
+
+V5.8.2 saves the shared scene only when dirty and retries recognised backup/permission failures three times (1- and 2-second delays). If saving still fails the job is not sent. Backup preferences are left unchanged; no separate scene snapshots are created. Save As remains available for making your own manual copy. Later render workers see the latest saved contents of the shared file.
 
 - **Render > Cloud Render Image** sends only the current frame.
 - **Render > Cloud Render Animation** sends the complete configured frame range.

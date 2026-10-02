@@ -6,9 +6,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Blender Render Launcher</AssemblyName>
-    <Version>6.3.0</Version>
-    <FileVersion>6.3.0.0</FileVersion>
-    <AssemblyVersion>6.3.0.0</AssemblyVersion>
+    <Version>6.6.0</Version>
+    <FileVersion>6.6.0.0</FileVersion>
+    <AssemblyVersion>6.6.0.0</AssemblyVersion>
     <ApplicationIcon>Assets\blender-render-icon.ico</ApplicationIcon>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -18,10 +18,16 @@
     <DebugType>embedded</DebugType>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Vendor\FFmpeg\ffmpeg.exe" LogicalName="BlenderRenderHeadless.FFmpeg.ffmpeg.exe" />
+    <EmbeddedResource Include="Vendor\FFmpeg\LICENSE" LogicalName="BlenderRenderHeadless.FFmpeg.LICENSE" />
+    <EmbeddedResource Include="Vendor\FFmpeg\README.txt" LogicalName="BlenderRenderHeadless.FFmpeg.README.txt" />
     <Compile Remove="Tests\**\*.cs" />
     <EmbeddedResource Include="Scripts\*.py" LogicalName="BlenderRenderHeadless.Scripts.%(Filename)%(Extension)" />
     <None Remove="Assets\blender-render-icon.png" />
     <Resource Include="Assets\blender-render-icon.png" />
     <None Include="Assets\blender-render-icon.ico" />
   </ItemGroup>
+  <Target Name="RequireBundledFfmpeg" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('Vendor\FFmpeg\ffmpeg.exe')" Text="Stage FFmpeg in Vendor\FFmpeg before building. See Vendor\FFmpeg\README.txt for the exact build." />
+  </Target>
 </Project>

@@ -13,3 +13,4 @@ __pycache__/
 *_contact_sheet.pdf
 *_contact_sheet*.jpg
 dist/
+Vendor/FFmpeg/ffmpeg.exe

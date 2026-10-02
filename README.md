@@ -1,5 +1,96 @@
 # Blender Render Launcher
 
+## V6.6.0 — selected-camera still batches
+
+Install sender **5.9.0** and use **Render > Cloud Render Image Selection** with camera objects selected in the current scene. It saves the shared blend once if dirty and sends every selected camera at the current frame, with per-camera resolution. No animation is created and the active camera is not changed. Each camera gets a separate queue entry/claim/audit report. One atomic `.camerabatch.json` publishes the group; launcher 6.6+ is required (older launchers ignore these batches).
+
+Each participating worker loads the blend once per batch attempt, then claims available cameras individually, skipping cameras currently owned by peers. Cameras completed by other machines are reported complete locally too. Camera errors do not prevent other cameras being attempted. Auto retry may reload the scene for failed cameras; ordinary separate submissions are not combined. Allow Children does not create extra workers for these batches. Scene data still comes from the one shared blend and later saves remain visible to workers that have not opened it yet.
+
+If the output path contains `{camera_name}`, it is expanded per camera. Otherwise the sanitized camera name is prefixed to the output filename. Identical resolved paths are refused. Primary compositor output selection follows existing sender behaviour; users with additional File Output nodes must give those outputs camera-specific paths too.
+
+Builds: `dist/v6.6-experimental/Blender Render Launcher v6.6.0.exe` and `dist/Blender-Render-Queue-Sender-v5.9.0.zip`. Tests: `Tests/test_camera_batch.py` uses two actual Blender workers and four cameras; `dotnet run --project Tests/ChildWorkers -c Release -- --camera-batch-ui` checks launcher protocol/intake.
+
+## V6.5.5 — audit CSVs in the watch folder
+
+New shared final-render, viewport-playblast and tiled-render audit CSVs are saved directly into the job's configured watch folder (normally `W:\Working Graphics\_3D RESOURCE\CloudRender`), rather than beside rendered outputs. Filenames retain their camera/job identifiers; reports are published via temporary files in the same folder. Existing CSVs are not moved. Partial Delete/repair reads both legacy output-folder CSVs and new watch-folder CSVs while retaining output-path safety checks.
+
+Update launchers on every worker; the sender add-on is unchanged. Delete watch folder also archives these CSVs with the rest of its contents. Build: `dist/v6.5.5-experimental/Blender Render Launcher v6.5.5.exe`.
+
+## V6.5.4 — shared-scene saves, still claim owner and Force overwrite
+
+Sender add-on **5.8.2** keeps the original shared blend file. It skips saving an unchanged scene; dirty scenes require a confirmed successful save. Recognised backup/permission/file-lock errors get three save attempts with 1- and 2-second delays. A persistent failure blocks submission with explicit NAS/manual Save As guidance. No snapshot copies or changes to Blender's backup preferences are made. Later workers read the latest saved shared scene.
+
+Shared non-tiled stills display **Job claimed by MACHINE** using the worker's current heartbeat receipt. The underlying Waiting/Rendering queue state stays intact and status reverts when the claim disappears/expires. Install this launcher on watching PCs to see it.
+
+**Force overwrite** beside Auto retry is off by default and remembered per PC. On overrides the job's output overwrite setting for ordinary final renders/playblasts; off uses saved settings (which may already enable overwrite). It does not erase shared completion receipts or steal claimed work, does not overwrite MP4/PSD exports, and does not change the uniquely named tiled output workflow. Set consistently across participating PCs before starting a new shared job if all existing images must be replaced. Retry/repair retains completed shared-frame protection.
+
+Portable launcher: `dist/v6.5.4-experimental/Blender Render Launcher v6.5.4.exe`. Installable sender: `dist/Blender-Render-Queue-Sender-v5.8.2.zip`.
+
+## V6.5.3 — Auto retry and Delete watch folder
+
+**Auto retry**, beside Allow Children, defaults on (including existing settings files) and remembers an explicit opt-out. Failed render jobs get up to three additional attempts, 30 seconds apart, with separate logs and a visible countdown. It works independently of Watch/Auto start. Cancel queue, global cancellation or switching Auto retry off prevents another attempt. Original job settings remain in effect, including overwrite for local jobs; completed shared-frame claims are retained.
+
+**Delete watch folder**, beside Reset watch, clears the configured CloudRender folder after confirmation. Stop rendering and queued work on ALL PCs first. For recovery, files/subfolders are moved into a unique `CloudRender-cleared-...` sibling folder, not permanently erased. The watch directory itself and outputs outside it remain intact. Worker claims, active export locks, linked paths and folders not named CloudRender are refused. Partial filesystem failures can leave some files in the recovery folder and others in place. Watch switches off on this PC; this is maintenance, not a replacement for Cancel everywhere. Concurrent submissions from other machines must be stopped by the operator.
+
+Build: `dist/v6.5.3-experimental/Blender Render Launcher v6.5.3.exe`. Tests: `dotnet run --project Tests/ChildWorkers -c Release -- --retry-cleanup`.
+
+## V6.5.2 — failure logs, Retry and Reset watch
+
+Every new render attempt saves a timestamped local log under `%LOCALAPPDATA%/BlenderRenderLauncher/logs`. **View log** opens it in Notepad; send this file when reporting a failure. It includes machine/version, job settings, Blender arguments, stdout/stderr, child-worker messages and exit codes, exceptions and final status. Each retry gets a separate file; logs survive clearing the queue or closing the app. Older failures cannot be reconstructed retrospectively. Logs include project paths and are not automatically uploaded.
+
+**Retry** on failed jobs requeues that job locally. Press Render jobs or use Watch + Auto start. Shared jobs retain their original identity/claims and completed-frame tracking; globally cancelled jobs cannot be resumed this way. Local overwrite settings still apply (with confirmation). Fix missing assets, permissions or settings before retrying.
+
+**Reset watch**, beside Clear queue, clears this PC's dismissal/discovery history and rescans the current NAS folder. It restores only still-open shared jobs, skips completed/cancelled jobs, respects ONLY MY PC, and keeps queued jobs without duplicating them. Auto start remains optional; the button also performs a one-off scan with Watch off. It does not modify or restart remote jobs.
+
+Portable build: `dist/v6.5.2-experimental/Blender Render Launcher v6.5.2.exe` (includes FFmpeg). Regression: `dotnet run --project Tests/ChildWorkers -c Release -- --recovery`.
+
+## V6.5.1 — bundled FFmpeg
+
+Share `dist/v6.5.1-experimental/Blender Render Launcher v6.5.1.exe`; no separate FFmpeg installation or PATH setup is required. Make MP4 and automatic MP4 export use the embedded static Windows x64 FFmpeg build. First use extracts and SHA-256 verifies it under `%LOCALAPPDATA%/BlenderRenderLauncher/tools/ffmpeg-9.0-<hash>/`, with its original licence and build/source information. Subsequent exports reuse it. The executable is larger; no administrator access or runtime download is required.
+
+FFmpeg is an independent subprocess, supplied by Gyan (9.0 full build, GPL v3). Original notices and exact upstream source reference are in `Vendor/FFmpeg/LICENSE` and `Vendor/FFmpeg/README.txt`, embedded unchanged. Review redistribution obligations before distributing outside your organisation: https://ffmpeg.org/legal.html . The large binary is excluded from Git; stage that exact build as `Vendor/FFmpeg/ffmpeg.exe` before building (missing payload fails the build; runtime checks its pinned hash). Test with `dotnet run --project Tests/ChildWorkers -c Release -- --bundled-ffmpeg`.
+
+## V6.5 — partial sequence repair
+
+Completed shared, non-tiled image sequences now offer **Partial Delete** and **Check and rerun** beside Make MP4. Partial Delete groups frames by machine using the accountability receipts (or CSV fallback), confirms the count and output folder, then moves the selected images into `_partial-delete/<job-id>/<batch>` beside the originals. This is recoverable; no existing MP4/PSD is removed.
+
+Check and rerun checks every expected frame, respecting frame step, for missing or zero-byte files. With confirmation it publishes a new NAS job with overwrite disabled, preserves original settings and sender identity, and carries forward valid frame receipts/attribution. Watchers discover it through the normal shared-folder scan; Watch, ONLY MY PC and Auto start still apply. The old job is retired to prevent it restarting alongside its repair. Use the new job for subsequent repairs. Regenerate derived MP4/PSD exports manually when needed.
+
+Safety: operations refuse active frame claims, concurrent automatic exports/repairs, duplicate repairs, linked paths, and recorded outputs outside the configured output folder. Keep the original shared job manifest and frame receipts or CSV. This first version requires absolute, accessible output paths (Blender `//` paths are resolved against the blend file), checks existence/size rather than image corruption, and does not repair tiled images or local-only jobs. A failed move can leave a partial backup; good frames remain untouched and Check and rerun finds the actual gaps.
+
+Regression checks: `dotnet run --project Tests/ChildWorkers -c Release -- --repair`. Portable build: `dist/v6.5-experimental/Blender Render Launcher v6.5.0.exe`.
+
+## V6.4 — hardware-aware turbo and Eevee children
+
+Allow Children now supports shared **Eevee image-sequence renders** as well as playblasts. Both `BLENDER_EEVEE` and `BLENDER_EEVEE_NEXT` are recognised. Cycles, tiled/single images, video outputs and non-distributed jobs remain excluded. The 24-frame eligibility minimum, sequential child trials and configured max-child cap still apply.
+
+The old free-VRAM-must-match-used-VRAM rule is removed. Before launching the primary, the controller measures GPU memory use. During rendering it estimates per-worker VRAM growth above that baseline, retaining the largest observed estimate. Adding another worker requires that estimate plus 15% margin and the safety reserve. RAM admission similarly allows a primary-sized worker plus 15% and the reserve, rather than requiring twice its memory. Other apps can affect estimates; this cannot guarantee avoidance of allocation failures or rendering spikes.
+
+Turbo defaults allow CPU up to 95% and GPU up to 100%; saturation alone no longer blocks a trial. Each child's actual throughput gain still determines whether it stays. Default reserves are **5% of each machine's total RAM/VRAM**, with floors of **2 GB RAM / 1 GB VRAM**, configurable in Settings. On 128 GB RAM / 24 GB VRAM that is approximately 6.4 GB / 1.2 GB reserved, in addition to predicted new-worker use. Unknown GPU telemetry or startup memory baseline prevents children; low memory retires them between frames. Multi-GPU machines use conservative worst-free-card sampling; workers are not pinned to individual GPUs.
+
+Upgrading old settings replaces the previous unchanged resource defaults (60/65% CPU/GPU and 8/4 GB reserves) with turbo defaults. Other tuning, including max children, is preserved. Custom non-default limits are retained. No Blender add-on update is required.
+
+Portable build: `dist/v6.4-experimental/Blender Render Launcher v6.4.0.exe`. Add `-- --eevee` to the regression-test command to exercise real Eevee worker coordination and retirement.
+
+## V6.3.1 — worker settings and faster admission
+
+**Settings…**, beside **Set Blender…**, contains grouped controls:
+
+- **Worker limits:** max children (extra processes, excluding the primary; 0–8, default 2).
+- **Timing:** warm-up (10 seconds), resource-check interval (3 seconds), consecutive healthy checks (2), startup allowance (2×), minimum remaining work (15 seconds).
+- **Resource limits:** maximum CPU/GPU usage and minimum free RAM/VRAM. The additional memory-reservation checks remain enforced.
+- **Performance checks:** trial duration (20 seconds) and minimum throughput improvement (10%).
+
+Settings are validated and saved per user alongside watch preferences. Restore defaults only takes effect when Save is clicked. Changes apply to the next job; running jobs keep their settings snapshot.
+
+The controller adds children **one at a time** up to the configured maximum. It measures Blender startup through the first completed frame, and requires remaining work of at least the larger of the startup allowance and minimum remaining time. This replaces the old fixed 60-second requirement. Each child must demonstrate the configured gain before another is considered. Failed or unhelpful trials stop further additions for that job. Resource pressure can retire children safely between frames.
+
+Queue status now explains the specific limit: warm-up, timing frames, healthy-check count, CPU/GPU load, free RAM/VRAM, insufficient remaining time, or max children reached. Max children is a ceiling, not a requested worker count. Shared playblasts only; unknown NVIDIA telemetry still prevents additions.
+
+Portable build: `dist/v6.3.1-experimental/Blender Render Launcher v6.3.1.exe`.
+
+Additional regression modes: `--policy-only` checks settings and short-job admission; `--settings-ui` renders the settings layout; `--controller` drives the full scheduler with protocol-test processes and fixed resource samples, verifying primary + two children and 600 frames with no leftover claims. Real Blender viewport coordination remains covered by `--viewport`. Production speed-up is hardware/scene dependent.
+
 ## V6.3 experimental — Allow Children
 
 The saved **Allow Children** checkbox is off by default. It can trial **one extra local Blender process** (two total) for distributed image-sequence playblasts with at least 24 frames. Both use the original job's settings and NAS frame claims. Normal final renders, tiled images, video outputs and uncoordinated local jobs are deliberately excluded from this first version.

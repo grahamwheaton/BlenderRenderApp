@@ -126,7 +126,7 @@ def mark_done(frame):
     os.replace(temporary, done_path(frame))
 
 def write_render_report():
-    report_path = frame_output(frames[0]).parent / f"render-report-{safe_name(camera_name)}-{safe_name(job_id)[:8]}.csv"
+    report_path = Path(coordination_folder) / f"render-report-{safe_name(camera_name)}-{safe_name(job_id)[:8]}.csv"
     temporary = report_path.with_name(report_path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
         report_path.parent.mkdir(parents=True, exist_ok=True)

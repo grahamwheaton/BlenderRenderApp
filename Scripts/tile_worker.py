@@ -21,6 +21,19 @@ safe=lambda v:re.sub(r'[^A-Za-z0-9_.-]+','_',str(v))
 folder=Path(j['coordinationFolder'])/'_claims'/safe(j['jobId'])
 folder.mkdir(parents=True,exist_ok=True)
 cancel=folder/'cancel.json'
+def write_tile_report(final, tiles):
+    report_path = Path(j['coordinationFolder']) / (final.stem + '.csv')
+    temporary = report_path.with_name(report_path.name + '.' + uuid.uuid4().hex + '.tmp')
+    with temporary.open('w', newline='', encoding='utf-8-sig') as report:
+        writer = csv.writer(report)
+        writer.writerow(['Tile', 'Core', 'Rendered by', 'Machine', 'Completed UTC epoch'])
+        for i in range(len(tiles)):
+            data = json.loads((folder / f'{i}.done').read_text())
+            writer.writerow([i, data['core'], data['author'], data['machine'], data['completed_at']])
+    os.replace(temporary, report_path)
+    print('BRH: Render accountability report: ' + str(report_path), flush=True)
+
+
 def check_cancel():
     if cancel.exists():
         raise InterruptedError('Cancelled everywhere')
@@ -144,11 +157,7 @@ def run():
                             raise RuntimeError('Bundled Blender Python is required for isolated stitching')
                         subprocess.run([str(python),str(Path(__file__).with_name('stitch_tiles.py')),str(manifest),str(final),'--buffer-mib','32'],check=True,creationflags=subprocess.CREATE_NO_WINDOW)
                     check_cancel()
-                    with final.with_suffix('.csv').open('w',newline='',encoding='utf-8-sig') as report:
-                        writer=csv.writer(report); writer.writerow(['Tile','Core','Rendered by','Machine','Completed UTC epoch'])
-                        for i in range(len(tiles)):
-                            data=json.loads((folder/f'{i}.done').read_text())
-                            writer.writerow([i,data['core'],data['author'],data['machine'],data['completed_at']])
+                    write_tile_report(final, tiles)
                     atomic(folder/'complete.json',{'output':str(final),'tiles':len(tiles),'completed_at':time.time()})
                     print('BRH: Stitched output: '+str(final),flush=True)
                     return
