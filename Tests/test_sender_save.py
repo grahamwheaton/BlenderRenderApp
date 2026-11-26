@@ -8,7 +8,7 @@ SOURCE = Path(__file__).resolve().parents[1] / "BlenderAddon" / "render_queue_se
 
 
 class SaveTests(unittest.TestCase):
-    def helper(self, dirty, outcomes, enabled=True, stays_dirty=False):
+    def helper(self, dirty, outcomes, enabled=True, stays_dirty=False, dirty_saves=0):
         data = SimpleNamespace(is_dirty=dirty)
         calls, sleeps = [], []
         def save():
@@ -16,10 +16,10 @@ class SaveTests(unittest.TestCase):
             result = outcomes.pop(0)
             if isinstance(result, Exception):
                 raise result
-            if result == {"FINISHED"} and not stays_dirty:
+            if result == {"FINISHED"} and not stays_dirty and len(calls) > dirty_saves:
                 data.is_dirty = False
             return result
-        env = dict(bpy=SimpleNamespace(data=data, ops=SimpleNamespace(wm=SimpleNamespace(save_mainfile=save))),
+        env = dict(bpy=SimpleNamespace(data=data, context=SimpleNamespace(view_layer=SimpleNamespace(update=lambda: None)), ops=SimpleNamespace(wm=SimpleNamespace(save_mainfile=save))),
                    prefs=lambda: SimpleNamespace(save_before_sending=enabled), time=SimpleNamespace(sleep=sleeps.append))
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "save_shared_scene")
@@ -49,10 +49,23 @@ class SaveTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_finished_but_dirty_has_specific_diagnostic(self):
-        fn, calls, _ = self.helper(True, [{"FINISHED"}], stays_dirty=True)
+        fn, calls, sleeps = self.helper(True, [{"FINISHED"}] * 3, stays_dirty=True)
         with self.assertRaisesRegex(RuntimeError, "FINISHED, but Blender still reports unsaved changes"):
             fn()
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1, 2])
+
+    def test_finished_dirty_then_clean_retries(self):
+        fn, calls, sleeps = self.helper(True, [{"FINISHED"}] * 2, dirty_saves=1)
+        fn()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [1])
+
+    def test_mixed_backup_and_dirty_failures_share_limit(self):
+        fn, calls, sleeps = self.helper(True, [RuntimeError("Unable to make version backup"), {"FINISHED"}, {"FINISHED"}], dirty_saves=2)
+        fn()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1, 2])
 
     def test_cancelled_has_operator_diagnostic(self):
         fn, _, _ = self.helper(True, [{"CANCELLED"}])

@@ -57,6 +57,12 @@ static class QueueUiTests
                 if (source.IsOpening || source.StatusIcon == openingIcon) throw new Exception("Ready transition/icon");
                 if (((Grid)window.FindName("ActiveRenderPanel")).DataContext != source) throw new Exception("Progress follows selection rather than active job");
                 source.Status = "Complete"; Call("RefreshActiveRender");
+                source.FailedOverwrite = true;
+                if (source.StatusDisplay != "Complete - FailedOverwrite" || source.Status != "Complete") throw new Exception("Overwrite warning must retain completed actions");
+                source.FailedOverwrite = false;
+                var column = (QueueColumnWidth)window.Resources["QueueColumn2"];
+                column.Width = new GridLength(230);
+                if (column.Width.Value != 230) throw new Exception("Queue column width update failed");
                 if (source.LogVisibility != Visibility.Visible || source.RenderRowVisibility != Visibility.Collapsed) throw new Exception("Completed row must show log and hide Render");
                 var report = (string)typeof(MainWindow).GetMethod("BuildCompletionReport", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { source })!;
                 if (!report.Contains("not a Blender console log") || !report.Contains(source.CameraName)) throw new Exception("Missing completion report context");

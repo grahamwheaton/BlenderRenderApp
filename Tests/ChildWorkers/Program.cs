@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if(args.Contains("--completion-features")) { CompletionFeatureTests.Run(); return; }
 if(args.Contains("--queue-ui")) { QueueUiTests.Run(); return; }
 if(args.Contains("--repair")) { RepairTests.Run(); return; }
 if(args.Contains("--recovery")) { RecoveryTests.Run(); return; }

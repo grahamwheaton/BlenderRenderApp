@@ -11,6 +11,32 @@ import threading
 import time
 import traceback
 import uuid
+import runpy
+
+overwrite_helpers = runpy.run_path(os.path.join(os.path.dirname(__file__), 'overwrite_output.py'))
+force_overwrite = os.environ.get('BRH_FORCE_OVERWRITE') == '1'
+actual_outputs = {}
+
+def actual_output(frame):
+    if frame in actual_outputs:
+        return actual_outputs[frame]
+    if distributed:
+        receipt = os.path.join(coordination_folder, '_claims', re.sub(r'[^A-Za-z0-9_.-]+', '_', job_id), f'{frame}.done')
+        try:
+            with open(receipt, encoding='utf-8') as data:
+                return json.load(data)['output']
+        except (OSError, ValueError, KeyError):
+            pass
+    return compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
+
+def render_force_frame(frame):
+    expected = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
+    actual, failed = overwrite_helpers['render_staged'](bpy, scene, uses_compositor_output, expected)
+    actual_outputs[frame] = actual
+    if failed and distributed:
+        marker = os.path.join(coordination_folder, '_claims', re.sub(r'[^A-Za-z0-9_.-]+', '_', job_id), 'failed-overwrite.json')
+        with open(marker, 'w', encoding='utf-8') as output:
+            json.dump({'output': actual}, output)
 
 print("BRH_SCENE_READY", flush=True)
 args = sys.argv[sys.argv.index("--") + 1:]
@@ -132,11 +158,11 @@ def compositor_frame_path(frame):
         scene.render.use_file_extension = previous_extension
 
 def report_completed_frame(render_scene):
-    rendered_path = compositor_frame_path(render_scene.frame_current) if uses_compositor_output else bpy.path.abspath(render_scene.render.frame_path(frame=render_scene.frame_current))
+    rendered_path = actual_output(render_scene.frame_current)
     print(f"BRH_FRAME_DONE:{render_scene.frame_current}|{rendered_path}", flush=True)
 
 def valid_output(frame):
-    path = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
+    path = actual_output(frame)
     try:
         return os.path.isfile(path) and os.path.getsize(path) > 0
     except OSError:
@@ -191,7 +217,7 @@ def render_distributed():
         return os.path.exists(done_path(frame)) or not replace_existing
 
     def frame_output_path(frame):
-        return compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
+        return actual_output(frame)
 
     def write_render_report():
         output_directory = coordination_folder
@@ -232,7 +258,7 @@ def render_distributed():
         for frame in frames:
             if frame not in reported and frame_complete(frame):
                 reported.add(frame)
-                path = compositor_frame_path(frame) if uses_compositor_output else bpy.path.abspath(scene.render.frame_path(frame=frame))
+                path = actual_output(frame)
                 print(f"BRH_FRAME_DONE:{frame}|{path}|{len(reported)}|{len(frames)}", flush=True)
         active_claims = [name for name in os.listdir(claim_dir) if name.endswith('.claim')]
         if len(reported) == len(frames) and not active_claims:
@@ -278,7 +304,9 @@ def render_distributed():
                     scene.frame_set(frame)
                     if os.environ.get('BRH_CAMERA_BATCH') == '1':
                         scene.camera = camera  # Timeline camera markers must not override this selected camera.
-                    if uses_compositor_output:
+                    if force_overwrite:
+                        render_force_frame(frame)
+                    elif uses_compositor_output:
                         bpy.ops.render.render()
                     else:
                         frame_output = bpy.path.abspath(scene.render.frame_path(frame=frame))
@@ -315,6 +343,14 @@ def render_distributed():
 try:
     if distributed:
         render_distributed()
+    elif force_overwrite and scene.render.image_settings.file_format != 'FFMPEG':
+        for frame in range(scene.frame_start, scene.frame_end + 1, scene.frame_step):
+            scene.frame_set(frame)
+            scene.camera = camera
+            render_force_frame(frame)
+            if not valid_output(frame):
+                raise RuntimeError(f'Frame {frame} has no saved output')
+            report_completed_frame(scene)
     elif uses_compositor_output:
         # Scene Output can be disabled, so render_write is not a reliable
         # completion callback for compositor-only jobs.

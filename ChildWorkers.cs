@@ -133,6 +133,7 @@ public partial class MainWindow
         Process Launch(ChildState? child)
         {
             var info = MakeStartInfo(exe, args, job.RequiresViewport);
+            info.Environment["BRH_FORCE_OVERWRITE"] = ForceOverwriteCheckBox.IsChecked == true ? "1" : "0";
             if (child != null) info.Environment["BRH_CHILD_STOP_FILE"] = child.StopPath;
             else info.Environment.Remove("BRH_CHILD_STOP_FILE");
             var process = child == null ? PrepareWorker(exe, args, job.RequiresViewport) : new Process { StartInfo = info };

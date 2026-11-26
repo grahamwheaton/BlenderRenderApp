@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Render Queue Sender",
     "author": "Graham Wheaton / OpenAI",
-    "version": (5, 9, 1),
+    "version": (5, 11, 0),
     "blender": (4, 0, 0),
     "location": "Render menu",
     "description": "Send the active camera to Blender Render Watch mode locally or through a shared NAS queue",
@@ -101,6 +101,7 @@ def save_shared_scene():
     if not prefs().save_before_sending:
         raise RuntimeError("The Blender file has unsaved changes. Save it before sending, or enable Save Before Sending.")
     for attempt in range(3):
+        finished_but_dirty = False
         try:
             result = bpy.ops.wm.save_mainfile()
             dirty_after = bool(bpy.data.is_dirty)
@@ -111,19 +112,30 @@ def save_shared_scene():
             if "FINISHED" not in result:
                 raise RuntimeError(f"Save operator did not finish. {diagnostic}")
             if dirty_after:
+                finished_but_dirty = True
                 raise RuntimeError(
                     "Save operator returned FINISHED, but Blender still reports unsaved changes. "
                     "This does not confirm a NAS/file-lock problem. Save manually, then send again. "
                     + diagnostic)
             return
         except RuntimeError as error:
-            transient = any(term in str(error).lower() for term in (
+            transient = finished_but_dirty or any(term in str(error).lower() for term in (
                 "backup", "cannot change old file", "access is denied", "permission", "being used by another process"))
+            print(f"[Render Queue Sender save attempt {attempt + 1}/3] "
+                  f"{error}; retry={transient and attempt < 2}", flush=True)
             if not transient or attempt == 2:
                 raise RuntimeError(
                     "Job NOT sent: shared-scene save validation failed. "
+                    f"Save attempts: {attempt + 1}/3. "
                     f"Original error: {error}"
                 ) from error
+            # Flush pending scene updates before the next save. Sleeping alone
+            # does not process Blender's UI event loop or deferred callbacks.
+            if finished_but_dirty:
+                try:
+                    bpy.context.view_layer.update()
+                except Exception as update_error:
+                    print(f"[Render Queue Sender] Scene update before retry: {update_error}", flush=True)
             time.sleep(attempt + 1)
 
 
@@ -196,7 +208,7 @@ class RENDERQUEUE_Preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Blender Render Queue Sender - Version 5.9.1", icon="INFO")
+        layout.label(text="Blender Render Queue Sender - Version 5.11.0", icon="INFO")
         layout.prop(self, "shared_queue_folder")
         layout.prop(self, "save_before_sending")
         layout.label(text="Cloud Image (tiled) settings — requires app V5.8")
@@ -340,6 +352,88 @@ class RENDERQUEUE_OT_cloud_render_tiled(Operator):
             return {'CANCELLED'}
 
 
+def write_playblast_selection(context, current_frame_only=False):
+    if context.area is None or context.area.type != 'VIEW_3D':
+        raise RuntimeError('Cloud Playblast must be run from the 3D View > View menu.')
+    cameras = sorted((obj for obj in context.selected_objects if obj.type == 'CAMERA' and obj.name in context.scene.objects), key=lambda obj: obj.name)
+    if not cameras:
+        raise RuntimeError('Select one or more camera objects in the current scene first.')
+    if not bpy.data.filepath:
+        raise RuntimeError('Save the Blender file before sending it to the render queue.')
+    if context.scene.render.image_settings.file_format == 'FFMPEG':
+        raise RuntimeError('Cloud Playblast requires an image format such as JPEG or PNG, not FFmpeg.')
+    folder_text = clean_path(prefs().shared_queue_folder)
+    if not folder_text:
+        raise RuntimeError('Set the Shared NAS Queue Folder first.')
+    shading = getattr(getattr(context.space_data, 'shading', None), 'type', 'SOLID')
+    overlays = overlay_settings(context.space_data)
+    save_shared_scene()
+    jobs, paths = [], set()
+    for camera in cameras:
+        job = build_job(context, 'PLAYBLAST', shading, overlays, current_frame_only=current_frame_only, camera_override=camera, save=False)
+        if job['format'] == 'FFMPEG':
+            raise RuntimeError('Cloud Playblast requires an image output format, not FFmpeg.')
+        job.update(version=3, distributed=True, requiresViewport=True)
+        job['outputPath'] = selection_output_path(job['outputPath'], camera.name, job['blendFile'])
+        canonical = os.path.normcase(os.path.normpath(job['outputPath'])).casefold()
+        if canonical in paths:
+            raise RuntimeError('Selected camera names produce identical output paths. Rename these cameras before sending.')
+        paths.add(canonical)
+        jobs.append(job)
+    # Individual viewport jobs: the still-image batch worker cannot run playblasts.
+    # Validate every camera before publishing anything; save the shared scene once.
+    folder = Path(folder_text)
+    folder.mkdir(parents=True, exist_ok=True)
+    published = 0
+    temporary = None
+    try:
+        for job in jobs:
+            filename = f'{time.strftime("%Y%m%d_%H%M%S")}_{job["jobId"]}.renderjob.json'
+            temporary = folder / ('.' + filename + '.tmp')
+            temporary.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding='utf-8')
+            os.replace(temporary, folder / filename)
+            published += 1
+    except OSError as error:
+        raise RuntimeError(f'Sent {published}/{len(jobs)} playblast jobs before a queue write failed. Check the queue before resending. {error}') from error
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return jobs
+
+
+class RENDERQUEUE_OT_cloud_playblast_selection(Operator):
+    bl_idname = 'view3d.cloud_playblast_selection'
+    bl_label = 'Cloud Playblast selected cameras'
+    bl_description = 'Send the scene frame range for every selected camera, using this viewport shading and overlays'
+
+    def execute(self, context):
+        try:
+            jobs = write_playblast_selection(context)
+            self.report({'INFO'}, f'Sent {len(jobs)} selected camera playblasts to the render queue')
+            return {'FINISHED'}
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+
+
+class RENDERQUEUE_OT_cloud_playblast_stills_selection(Operator):
+    bl_idname = 'view3d.cloud_playblast_stills_selection'
+    bl_label = 'Cloud Playblast Still Images — Selected Cameras'
+    bl_description = 'Send the current frame for each selected camera, using this viewport shading and overlays'
+
+    def execute(self, context):
+        try:
+            jobs = write_playblast_selection(context, current_frame_only=True)
+            self.report({'INFO'}, f'Sent {len(jobs)} selected camera playblast stills')
+            return {'FINISHED'}
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+
+
 class RENDERQUEUE_OT_cloud_playblast(Operator):
     bl_idname = "view3d.cloud_playblast"
     bl_label = "Cloud Render Playblast"
@@ -376,6 +470,8 @@ def draw_render_menu(self, context):
 def draw_view_menu(self, context):
     self.layout.separator()
     self.layout.operator(RENDERQUEUE_OT_cloud_playblast.bl_idname, icon="RENDER_ANIMATION")
+    self.layout.operator(RENDERQUEUE_OT_cloud_playblast_selection.bl_idname, icon="OUTLINER_OB_CAMERA")
+    self.layout.operator(RENDERQUEUE_OT_cloud_playblast_stills_selection.bl_idname, icon="RENDER_STILL")
 
 
 classes = (
@@ -385,6 +481,8 @@ classes = (
     RENDERQUEUE_OT_cloud_render_tiled,
     RENDERQUEUE_OT_cloud_render_animation,
     RENDERQUEUE_OT_cloud_playblast,
+    RENDERQUEUE_OT_cloud_playblast_selection,
+    RENDERQUEUE_OT_cloud_playblast_stills_selection,
 )
 
 

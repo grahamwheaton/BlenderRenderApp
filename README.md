@@ -1,6 +1,35 @@
 # Blender Render Launcher
 
-## V8.0.0 — queue-first UI (`ui-queue-first` branch)
+## V8.1.1 — 48-hour queue retention
+
+- Watch discovery skips NAS manifests last modified more than 48 hours ago before reading JSON or checking scene/output files. Applies to render, tile and camera-batch jobs, including Reset watch.
+- Recent manifests are admitted in batches of at most 25 per poll. Existing inactive queue entries expire on a minute check. Running queues, exports, opening/reserved/preloaded jobs and known remote claims are protected.
+- Local queue cleanup only: no shared manifests, claims, audits or rendered files are deleted. Old jobs are not rejoined on startup; resubmit them if still needed.
+- Launcher: `dist/v8/Blender Render Launcher v8.1.1.exe`. Sender unchanged.
+
+## V8.1.0 — completion controls
+
+- Make MP4 starts its save dialog in the selected job's output directory, not the last-used MP4 directory. Automatic MP4 export continues saving alongside the source frames.
+- Shutdown on completion is session-only and off on every launch. A completed queue starts a 30-minute countdown; new queue entries reset it. Waiting/failed/non-ignored unfinished jobs, loading, running renders, automatic exports, cleanup and owned dialogs block/reset it. Ignored jobs do not block it. Cancel shutdown disables the option. Closing the app cancels its countdown. The Windows shutdown request does not force-close unsaved applications.
+- Sender v5.11.0 adds View > Cloud Playblast Still Images — Selected Cameras. Sends the current frame for each selected camera with the existing viewport shading/overlay settings and one shared-scene save.
+- Deliverables: `dist/v8/Blender Render Launcher v8.1.0.exe` and `dist/Blender-Render-Queue-Sender-v5.11.0.zip`.
+
+## V8.0.2 — Force overwrite path correction
+
+- Canonicalizes output paths before matching staged compositor files, fixing false failures when a saved directory contains `Model/../Visuals`.
+- Locked existing outputs still use the `_FailedOverwrite` fallback. Source scenes and compositor naming are not changed. Animation File Output names need explicit frame numbering such as `{camera_name}_####`.
+- Verified with Blender 5.2 compositor rendering, parent-directory paths and locked-output regression tests.
+- Build: `dist/v8/Blender Render Launcher v8.0.2.exe`. No sender update required.
+
+### Previous V8.0.1 — overwrite fallback and adjustable columns
+
+- Drag the dividers in the queue header to resize columns (current session).
+- With Force overwrite enabled, image outputs are staged before replacing the destination. If an existing destination cannot be replaced, the new image is saved beside it with `_FailedOverwrite` before the extension (a unique suffix is added if needed). No existing fallback file is overwritten.
+- Completed jobs with fallback output display `Complete - FailedOverwrite`; completion actions remain available. Shared receipts/audits and frame reporting point to the actual saved file. Update all watching apps for consistent reporting.
+- Applies to regular image renders, compositor File Output images and viewport playblasts. Native FFmpeg/movie renders and tiled assembly are unchanged. Force overwrite needs temporary disk space for staged outputs and adds a copy step. Unwritable folders, failed renders or failures saving the alternate remain failures, not completed jobs.
+- Build: `dist/v8/Blender Render Launcher v8.0.1.exe`. No sender update is required for these changes.
+
+### Previous V8.0.0 — queue-first UI (`ui-queue-first` branch)
 
 - Promotes the queue-first UI and the changes below to version 8.0.0.
 - Build: `dist/v8/Blender Render Launcher v8.0.0.exe`.

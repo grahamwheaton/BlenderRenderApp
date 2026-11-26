@@ -235,6 +235,7 @@ public partial class MainWindow
 
     private void WorkerReady(RenderJob job, string line)
     {
+        if (line.StartsWith("BRH_FAILED_OVERWRITE:")) job.FailedOverwrite = true;
         if (line != "BRH_SCENE_READY") return;
         job.IsOpening = false;
         StatusText.Text = $"Rendering {job.CameraName} · {job.FrameSummary}";

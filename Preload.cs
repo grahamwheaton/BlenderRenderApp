@@ -80,6 +80,7 @@ public partial class MainWindow
 
     private Process PrepareWorker(string exe, IEnumerable<string> arguments, bool hiddenWindow = false)
     {
+        ExtractScript("overwrite_output.py");
         var args = arguments.ToArray();
         var pending = _preloaded;
         var scriptIndex = Array.IndexOf(args, "--python");
@@ -92,7 +93,9 @@ public partial class MainWindow
             return pending.Process;
         }
         StopPreload();
-        return new Process { StartInfo = MakeStartInfo(exe, args, hiddenWindow) };
+        var info = MakeStartInfo(exe, args, hiddenWindow);
+        info.Environment["BRH_FORCE_OVERWRITE"] = ForceOverwriteCheckBox.IsChecked == true ? "1" : "0";
+        return new Process { StartInfo = info };
     }
 
     private void StartPreparedWorker(Process process)
@@ -100,7 +103,7 @@ public partial class MainWindow
         if (_preloadReleases.Remove(process, out var release))
         {
             var temp = release.Control + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(new { script = release.Script, args = release.Args }));
+            File.WriteAllText(temp, JsonSerializer.Serialize(new { script = release.Script, args = release.Args, forceOverwrite = ForceOverwriteCheckBox.IsChecked == true }));
             File.Move(temp, release.Control);
             AppendLog("Using preloaded scene; attempting normal job claims now.");
         }

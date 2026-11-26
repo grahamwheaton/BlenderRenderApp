@@ -13,6 +13,11 @@ import threading
 import time
 import traceback
 import uuid
+import runpy
+
+overwrite_helpers = runpy.run_path(str(Path(__file__).with_name('overwrite_output.py')))
+force_overwrite = os.environ.get('BRH_FORCE_OVERWRITE') == '1'
+actual_outputs = {}
 
 print("BRH_SCENE_READY", flush=True)
 args = sys.argv[sys.argv.index("--") + 1:]
@@ -52,6 +57,12 @@ def done_path(frame):
     return claim_folder / f"{frame}.done"
 
 def frame_output(frame):
+    if frame in actual_outputs:
+        return Path(actual_outputs[frame])
+    try:
+        return Path(json.loads(done_path(frame).read_text(encoding='utf-8'))['output'])
+    except (OSError, ValueError, KeyError):
+        pass
     previous = scene.render.filepath
     scene.render.filepath = base_filepath
     try:
@@ -223,7 +234,13 @@ def run_distributed_capture():
                         staged = Path(str(staged_base) + scene.render.file_extension)
                         if not staged.is_file() or staged.stat().st_size <= 0:
                             raise RuntimeError(f"Viewport capture did not create frame {frame}.")
-                        copy_frame(staged, frame_output(frame))
+                        if force_overwrite:
+                            actual, failed = overwrite_helpers['commit_output'](staged, frame_output(frame), True)
+                            actual_outputs[frame] = actual
+                            if failed:
+                                (claim_folder / 'failed-overwrite.json').write_text(json.dumps({'output': actual}), encoding='utf-8')
+                        else:
+                            copy_frame(staged, frame_output(frame))
                         scene.render.filepath = base_filepath
                     if not valid_output(frame):
                         raise RuntimeError(f"Frame {frame} did not produce a non-empty output file.")

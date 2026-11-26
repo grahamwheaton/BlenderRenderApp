@@ -88,6 +88,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializeCompletionShutdown();
         CameraItems.ItemsSource = _cameras;
         QueueItems.ItemsSource = _queue;
         CameraSettingsContent.IsEnabled = false;
@@ -220,6 +221,7 @@ public partial class MainWindow : Window
 
     private void ProgressTimer_Tick(object? sender, EventArgs e)
     {
+        PruneExpiredQueueJobs();
         RefreshActiveRender();
         RefreshSharedPreviews(); PollPreload();
         foreach (var completedJob in _queue.Where(j => j.Status == "Complete").ToList())
@@ -234,6 +236,7 @@ public partial class MainWindow : Window
             {
                 var claimFolder = Path.Combine(job.CoordinationFolder, "_claims", SafeJobId(job.JobId));
                 if (!Directory.Exists(claimFolder)) continue;
+                if (File.Exists(Path.Combine(claimFolder, "failed-overwrite.json"))) job.FailedOverwrite = true;
                 if (File.Exists(Path.Combine(claimFolder, "cancel.json")))
                 {
                     job.MarkGloballyCancelled();
@@ -263,7 +266,8 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(_cloudQueueFolder) || !Directory.Exists(_cloudQueueFolder)) return;
         try
         {
-            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.tilejob.json")).Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.camerabatch.json")).OrderBy(File.GetCreationTimeUtc))
+            foreach (var file in Directory.EnumerateFiles(_cloudQueueFolder, "*.renderjob.json").Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.tilejob.json")).Concat(Directory.EnumerateFiles(_cloudQueueFolder, "*.camerabatch.json"))
+                .Where(file => !_seenCloudFiles.Contains(file) && !QueueRetention.ExpiredFile(file)).OrderBy(File.GetCreationTimeUtc).Take(25))
             {
                 if (!_seenCloudFiles.Add(file)) continue;
                 try { QueueIncomingJob(File.ReadAllText(file, Encoding.UTF8), "Cloud", file); }
@@ -275,6 +279,7 @@ public partial class MainWindow : Window
 
     private bool QueueIncomingJob(string json, string source, string? cloudJobFile = null)
     {
+        if (cloudJobFile != null && QueueRetention.ExpiredFile(cloudJobFile)) return false;
         try
         {
             using var envelope = JsonDocument.Parse(json);
@@ -322,6 +327,7 @@ public partial class MainWindow : Window
         }
         _receivedJobIds.Add(incoming.JobId);
         var job = incoming.ToRenderJob(coordinationFolder);
+        if (cloudJobFile != null) job.SubmittedUtc = File.GetLastWriteTimeUtc(cloudJobFile);
         job.CloudManifestPath = cloudJobFile ?? "";
         _queue.Add(job); UpdateQueueState();
         if (job.Status == "Waiting") ResetAutoStartCountdown();
@@ -346,6 +352,7 @@ public partial class MainWindow : Window
 
     private static bool IsDistributedJobFile(string file)
     {
+        if (QueueRetention.ExpiredFile(file)) return false;
         try
         {
             using var document = JsonDocument.Parse(File.ReadAllText(file, Encoding.UTF8));
@@ -1098,6 +1105,7 @@ public class CameraSetup : NotifyBase
 
 public class RenderJob : NotifyBase
 {
+    public DateTime SubmittedUtc { get; set; } = DateTime.UtcNow;
     public string CloudManifestPath { get; set; } = "";
     private bool _previewBusy;
     public bool PreviewBusy { get => _previewBusy; set { if (Set(ref _previewBusy, value)) { OnPropertyChanged(nameof(CanGeneratePreview)); OnPropertyChanged(nameof(PreviewButtonText)); } } }
@@ -1145,7 +1153,9 @@ private string _status = "Waiting"; public string Status { get => _status; set {
     public string ClaimedBy { get => _claimedBy; set { if (Set(ref _claimedBy, value)) OnPropertyChanged(nameof(StatusDisplay)); } }
     private string _preloadLabel = "";
     public string PreloadLabel { get => _preloadLabel; set { if (Set(ref _preloadLabel, value)) OnPropertyChanged(nameof(StatusDisplay)); } }
-    public string StatusDisplay => !string.IsNullOrEmpty(PreloadLabel) ? PreloadLabel : IsOpening && Status is "Waiting" or "Rendering" ? "Opening…" : !string.IsNullOrEmpty(ClaimedBy) && Status is "Waiting" or "Rendering" ? "Job claimed by " + ClaimedBy : Status;
+    private bool _failedOverwrite;
+    public bool FailedOverwrite { get => _failedOverwrite; set { if (Set(ref _failedOverwrite, value)) OnPropertyChanged(nameof(StatusDisplay)); } }
+    public string StatusDisplay => Status == "Complete" && FailedOverwrite ? "Complete - FailedOverwrite" : !string.IsNullOrEmpty(PreloadLabel) ? PreloadLabel : IsOpening && Status is "Waiting" or "Rendering" ? "Opening…" : !string.IsNullOrEmpty(ClaimedBy) && Status is "Waiting" or "Rendering" ? "Job claimed by " + ClaimedBy : Status;
     private string _logPath = "";
     public string LogPath { get => _logPath; set { if (Set(ref _logPath, value)) OnPropertyChanged(nameof(LogVisibility)); } }
     private string _failureDetail = "";

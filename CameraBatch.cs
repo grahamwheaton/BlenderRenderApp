@@ -77,6 +77,7 @@ public partial class MainWindow
                         }
                         else
                         {
+                            WorkerReady(job, parts[1]);
                             var match = FramePattern.Match(parts[1]);
                             if (match.Success && int.TryParse(match.Groups[1].Value, out var frame)) job.ReportFrame(frame, match.Groups[2].Value);
                             AppendLog($"[{job.CameraName}] {parts[1]}");

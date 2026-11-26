@@ -56,8 +56,11 @@ public sealed class Mp4ExportWindow : Window
             if (locate.ShowDialog(this) != true) return;
             ffmpeg = locate.FileName;
         }
+        string destination;
+        try { destination = Mp4Encoder.DefaultDestination(_job); }
+        catch (Exception ex) { _message.Text = "Cannot resolve this job's output folder: " + ex.Message; return; }
         var save = new SaveFileDialog { Title = "Save MP4", Filter = "MP4 video|*.mp4", DefaultExt = ".mp4", AddExtension = true,
-            FileName = string.Concat(_job.CameraName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)) + ".mp4", OverwritePrompt = true };
+            InitialDirectory = Path.GetDirectoryName(destination), FileName = destination, OverwritePrompt = true };
         if (save.ShowDialog(this) != true) return;
         if (!Path.GetExtension(save.FileName).Equals(".mp4", StringComparison.OrdinalIgnoreCase))
         { _message.Text = "Choose an output filename ending in .mp4."; return; }
@@ -87,6 +90,16 @@ public sealed class Mp4ExportWindow : Window
 
 public static class Mp4Encoder
 {
+    public static string DefaultDestination(RenderJob job)
+    {
+        var path = job.OutputPath.Replace("{camera_name}", job.CameraName);
+        if (path.StartsWith("//")) path = Path.Combine(Path.GetDirectoryName(job.BlendFile)!, path[2..]);
+        if (!Path.IsPathFullyQualified(path)) throw new IOException("Output path must be absolute or Blender-relative (//).");
+        var directory = Path.EndsInDirectorySeparator(path) || Directory.Exists(path) ? path : Path.GetDirectoryName(path)!;
+        var name = string.Concat(job.CameraName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+        return Path.Combine(Path.GetFullPath(directory), name + ".mp4");
+    }
+
     public static string? FindFfmpeg()
     {
         try { return BundledFfmpeg.Resolve(); }
